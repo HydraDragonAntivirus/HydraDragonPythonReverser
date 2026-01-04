@@ -45,14 +45,38 @@ static void CheckForProtection() {
     dbgPrintf("[HOOK] WARNING: Debugger detected!\n");
   }
 
-  // Simple check for LoadLibraryW hook
   HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
   if (hKernel32) {
     BYTE *pLoadLib = (BYTE *)GetProcAddress(hKernel32, "LoadLibraryW");
     if (pLoadLib && (*pLoadLib == 0xE9 || *pLoadLib == 0xEB)) {
-      dbgPrintf("[HOOK] WARNING: LoadLibraryW appears to be HOOKED (Jmp detected)!\n");
+      dbgPrintf("[HOOK] WARNING: LoadLibraryW appears to be hooked (JMP/CALL)!\n");
     }
   }
+}
+
+static bool GetHookFilePathFromConfig(char *outPath, size_t maxLen) {
+  const char *configPath = "C:\\pythondumps\\hook_config.ini";
+  FILE *f = fopen(configPath, "r");
+  if (!f) return false;
+
+  char line[MAX_PATH];
+  bool found = false;
+  while (fgets(line, sizeof(line), f)) {
+    if (strncmp(line, "HookPath=", 9) == 0) {
+      char *path = line + 9;
+      // Trim newline
+      char *nl = strpbrk(path, "\r\n");
+      if (nl) *nl = '\0';
+
+      if (path[0] != '\0') {
+        snprintf(outPath, maxLen, "%s\\%s.py", path, PYMODULE_NAME);
+        found = true;
+        break;
+      }
+    }
+  }
+  fclose(f);
+  return found;
 }
 
 // Find python.exe in running processes
@@ -271,6 +295,7 @@ static void AutoSetPythonHome() {
     g_pythonHomePath[MAX_PATH - 1] = '\0';
 
     dbgPrintf("[HOOK] Set PYTHONHOME=%s\n", pythonHome);
+    if (g_logFile) fprintf(g_logFile, "[HOOK] Set PYTHONHOME=%s\n", pythonHome);
 
     // Also set PYTHONPATH
     char pythonPath[MAX_PATH * 2];
@@ -278,8 +303,10 @@ static void AutoSetPythonHome() {
              pythonHome, pythonHome);
     SetEnvironmentVariableA("PYTHONPATH", pythonPath);
     dbgPrintf("[HOOK] Set PYTHONPATH=%s\n", pythonPath);
+    if (g_logFile) fprintf(g_logFile, "[HOOK] Set PYTHONPATH=%s\n", pythonPath);
   } else {
     dbgPrintf("[HOOK] Could not auto-detect PYTHONHOME\n");
+    if (g_logFile) fprintf(g_logFile, "[HOOK] Could not auto-detect PYTHONHOME\n");
   }
 }
 
@@ -395,9 +422,18 @@ DWORD WINAPI hookImpl(LPVOID lpParam) {
     // Prepare the PythonHome path for injection
     char pyHomePath[MAX_PATH];
     strncpy(pyHomePath, g_pythonHomePath, sizeof(pyHomePath) - 1);
+    pyHomePath[sizeof(pyHomePath) - 1] = '\0'; // Ensure termination
     for (char *p = pyHomePath; *p; ++p) {
       if (*p == '\\')
         *p = '/';
+    }
+
+    // Get Python Version for logging
+    typedef const char *(*Py_GetVersionFunc)();
+    auto Py_GetVersion = (Py_GetVersionFunc)GetProcAddress(hPyDll, "Py_GetVersion");
+    if (Py_GetVersion) {
+        dbgPrintf("[HOOK] Python Version: %s\n", Py_GetVersion());
+        if (g_logFile) fprintf(g_logFile, "[HOOK] Python Version: %s\n", Py_GetVersion());
     }
 
     char pycmd[8192];
@@ -474,27 +510,80 @@ DWORD WINAPI hookImpl(LPVOID lpParam) {
         pyHomePath); // Pass path string as argument 2 to snprintf
 
     int res = PyRun_SimpleString(pycmd);
+    dbgPrintf("[HOOK] PyRun_SimpleString(setup) returned: %d\n", res);
+    if (g_logFile) fprintf(g_logFile, "[HOOK] PyRun_SimpleString(setup) returned: %d\n", res);
+    
     if (res != 0) {
       dbgPrintf("[HOOK] Failed to run Python setup snippet\n");
     }
   }
 
-  // Import the hook module
+  // ATTEMPT EXPLICIT LOAD IF PyImport_ImportModule fails
   void *hook_module = PyImport_ImportModule(PYMODULE_NAME);
 
   if (hook_module) {
     Py_DecRef(hook_module);
     PyGILState_Release(gilState);
-
-    dbgPrintf("[HOOK] Successfully imported " PYMODULE_NAME "\n");
-    if (g_logFile) {
-      fprintf(g_logFile, "[HOOK] Successfully imported " PYMODULE_NAME "\n");
-      fflush(g_logFile);
-    }
-
+    dbgPrintf("[HOOK] Successfully imported " PYMODULE_NAME " via standard import\n");
+    if (g_logFile) fprintf(g_logFile, "[HOOK] Successfully imported " PYMODULE_NAME " via standard import\n");
     MessageBoxA(NULL, "Hook injection successful!", "Success", MB_OK);
     return 0;
   } else {
+    dbgPrintf("[HOOK] Standard import failed, trying explicit file execution...\n");
+    if (g_logFile) fprintf(g_logFile, "[HOOK] Standard import failed, trying explicit file execution...\n");
+
+    char hookFilePath[MAX_PATH];
+    if (GetHookFilePathFromConfig(hookFilePath, MAX_PATH)) {
+      dbgPrintf("[HOOK] Found explicit hook path: %s\n", hookFilePath);
+      if (g_logFile) fprintf(g_logFile, "[HOOK] Found explicit hook path: %s\n", hookFilePath);
+
+      // Convert backslashes for Python
+      char pyHookPath[MAX_PATH];
+      strncpy(pyHookPath, hookFilePath, MAX_PATH - 1);
+      pyHookPath[MAX_PATH - 1] = '\0';
+      for (char *p = pyHookPath; *p; ++p) if (*p == '\\') *p = '/';
+
+      char execCmd[8192]; // INCREASED SIZE TO PREVENT OVERFLOW
+      snprintf(execCmd, sizeof(execCmd), 
+               "import sys, os\n"
+               "print('--- Explicit Hook Execution Start ---')\n"
+               "path = r'%s'\n"
+               "print('Target Hook File:', path)\n"
+               "if os.path.exists(path):\n"
+               "    try:\n"
+               "        with open(path, 'r', encoding='utf-8') as f:\n"
+               "            code = f.read()\n"
+               "            print('Read', len(code), 'bytes from hook file')\n"
+               "            exec(compile(code, path, 'exec'), {'__name__': '__main__', '__file__': path})\n"
+               "        print('Explicit execution REACHED END OF SCRIPT')\n"
+               "    except Exception as e:\n"
+               "        print('EXPLICIT EXECUTION ERROR:', e)\n"
+               "        import traceback\n"
+               "        traceback.print_exc()\n"
+               "        raise\n"
+               "else:\n"
+               "    print('Hook file not found at:', path)\n"
+               "    raise FileNotFoundError(path)\n", 
+               pyHookPath);
+
+      dbgPrintf("[HOOK] Running PyRun_SimpleString(execCmd)...\n");
+      int execRes = PyRun_SimpleString(execCmd);
+      dbgPrintf("[HOOK] PyRun_SimpleString(execCmd) returned: %d\n", execRes);
+      if (execRes == 0) {
+        PyGILState_Release(gilState);
+        dbgPrintf("[HOOK] Successfully executed hook file explicitly!\n");
+        if (g_logFile) fprintf(g_logFile, "[HOOK] Successfully executed hook file explicitly!\n");
+        MessageBoxA(NULL, "Hook injection successful (Explicit)!", "Success", MB_OK);
+        return 0;
+      } else {
+        dbgPrintf("[HOOK] Explicit execution FAILED with code: %d\n", execRes);
+        if (g_logFile) fprintf(g_logFile, "[HOOK] Explicit execution FAILED with code: %d\n", execRes);
+      }
+    } else {
+      dbgPrintf("[HOOK] Could not find hook path in config for explicit load.\n");
+      if (g_logFile) fprintf(g_logFile, "[HOOK] Could not find hook path in config for explicit load.\n");
+    }
+
     if (PyErr_Print)
       PyErr_Print();
     PyGILState_Release(gilState);
@@ -506,31 +595,23 @@ DWORD WINAPI hookImpl(LPVOID lpParam) {
       fflush(g_logFile);
     }
     
-    // ATTEMPT TO CAPTURE TRACEBACK TO FILE
+    // ATTEMPT TO CAPTURE TRACEBACK TO FILE (compatible version)
     if (PyRun_SimpleString) {
-        // We use a raw string for the python script to avoid escaping hell
         const char *errorLogScript = 
             "import traceback, sys, os\n"
             "try:\n"
             "    log_path = r'C:\\pythondumps\\hook_import_error.log'\n"
-            "    # Fallback to Public if C:\\pythondumps not writable\n"
             "    if not os.path.exists(r'C:\\pythondumps'):\n"
-            "        try: os.makedirs(r'C:\\pythondumps', exist_ok=True)\n"
+            "        try: os.makedirs(r'C:\\pythondumps')\n"
             "        except: log_path = r'C:\\Users\\Public\\pythondumps\\hook_import_error.log'\n"
             "    \n"
-            "    # Ensure dir exists\n"
-            "    try: os.makedirs(os.path.dirname(log_path), exist_ok=True)\n"
-            "    except: pass\n"
-            "    \n"
-            "    with open(log_path, 'w', encoding='utf-8') as f:\n"
+            "    with open(log_path, 'w') as f:\n"
             "        f.write('HOOK IMPORT FAILURE REPORT\\n')\n"
             "        f.write('==========================\\n')\n"
             "        f.write('Traceback:\\n')\n"
             "        f.write(traceback.format_exc())\n"
             "        f.write('\\nSYS.PATH:\\n')\n"
-            "        for p in sys.path: f.write(f'  {p}\\n')\n"
-            "        f.write('\\nSYS.META_PATH:\\n')\n"
-            "        for p in sys.meta_path: f.write(f'  {p}\\n')\n"
+            "        for p in sys.path: f.write('  ' + str(p) + '\\n')\n"
             "        f.write('\\nSYS.MODULES (keys):\\n')\n"
             "        f.write(str(list(sys.modules.keys())))\n"
             "except Exception as e:\n"
@@ -539,9 +620,7 @@ DWORD WINAPI hookImpl(LPVOID lpParam) {
         PyRun_SimpleString(errorLogScript);
     }
 
-    MessageBoxA(NULL,
-                "Failed to import " PYMODULE_NAME "\nCheck hook_output.log",
-                "Hook Error", MB_ICONEXCLAMATION);
+    MessageBoxA(NULL, "Failed to import " PYMODULE_NAME "\nCheck hook_output.log", "Hook Error", MB_ICONEXCLAMATION);
     return 1;
   }
 }
