@@ -21,6 +21,53 @@ HWND_BROADCAST = 0xFFFF
 SMTO_ABORTIFHUNG = 0x0002
 PROCESS_SUSPEND_RESUME = 0x0800
 
+# Thread Access Rights
+THREAD_GET_CONTEXT = 0x0008
+THREAD_SET_CONTEXT = 0x0010
+THREAD_SUSPEND_RESUME = 0x0002
+THREAD_QUERY_INFORMATION = 0x0040
+THREAD_ALL_ACCESS = 0x1FFFFF
+
+# CONTEXT flags
+CONTEXT_AMD64 = 0x100000
+CONTEXT_CONTROL = CONTEXT_AMD64 | 0x01
+CONTEXT_INTEGER = CONTEXT_AMD64 | 0x02
+CONTEXT_SEGMENTS = CONTEXT_AMD64 | 0x04
+CONTEXT_FLOATING_POINT = CONTEXT_AMD64 | 0x08
+CONTEXT_DEBUG_REGISTERS = CONTEXT_AMD64 | 0x10
+CONTEXT_FULL = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT
+
+class M128A(ctypes.Structure):
+    _fields_ = [("Low", ctypes.c_uint64), ("High", ctypes.c_int64)]
+
+class CONTEXT64(ctypes.Structure):
+    _pack_ = 16
+    _fields_ = [
+        ("P1Home", ctypes.c_uint64), ("P2Home", ctypes.c_uint64), ("P3Home", ctypes.c_uint64),
+        ("P4Home", ctypes.c_uint64), ("P5Home", ctypes.c_uint64), ("P6Home", ctypes.c_uint64),
+        ("ContextFlags", wintypes.DWORD), ("MxCsr", wintypes.DWORD),
+        ("SegCs", wintypes.WORD), ("SegDs", wintypes.WORD), ("SegEs", wintypes.WORD),
+        ("SegFs", wintypes.WORD), ("SegGs", wintypes.WORD), ("SegSs", wintypes.WORD),
+        ("EFlags", wintypes.DWORD),
+        ("Dr0", ctypes.c_uint64), ("Dr1", ctypes.c_uint64), ("Dr2", ctypes.c_uint64),
+        ("Dr3", ctypes.c_uint64), ("Dr6", ctypes.c_uint64), ("Dr7", ctypes.c_uint64),
+        ("Rax", ctypes.c_uint64), ("Rcx", ctypes.c_uint64), ("Rdx", ctypes.c_uint64),
+        ("Rbx", ctypes.c_uint64), ("Rsp", ctypes.c_uint64), ("Rbp", ctypes.c_uint64),
+        ("Rsi", ctypes.c_uint64), ("Rdi", ctypes.c_uint64), ("R8", ctypes.c_uint64),
+        ("R9", ctypes.c_uint64), ("R10", ctypes.c_uint64), ("R11", ctypes.c_uint64),
+        ("R12", ctypes.c_uint64), ("R13", ctypes.c_uint64), ("R14", ctypes.c_uint64),
+        ("R15", ctypes.c_uint64), ("Rip", ctypes.c_uint64),
+        ("Header", M128A * 2), ("Legacy", M128A * 8),
+        ("Xmm0", M128A), ("Xmm1", M128A), ("Xmm2", M128A), ("Xmm3", M128A),
+        ("Xmm4", M128A), ("Xmm5", M128A), ("Xmm6", M128A), ("Xmm7", M128A),
+        ("Xmm8", M128A), ("Xmm9", M128A), ("Xmm10", M128A), ("Xmm11", M128A),
+        ("Xmm12", M128A), ("Xmm13", M128A), ("Xmm14", M128A), ("Xmm15", M128A),
+        ("VectorRegister", M128A * 26), ("VectorControl", ctypes.c_uint64),
+        ("DebugControl", ctypes.c_uint64), ("LastBranchToRip", ctypes.c_uint64),
+        ("LastBranchFromRip", ctypes.c_uint64), ("LastExceptionToRip", ctypes.c_uint64),
+        ("LastExceptionFromRip", ctypes.c_uint64),
+    ]
+
 # Load Windows DLLs
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 user32 = ctypes.WinDLL('user32', use_last_error=True)
@@ -59,7 +106,17 @@ ntdll.NtSuspendProcess.restype = wintypes.LONG
 ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
 ntdll.NtResumeProcess.restype = wintypes.LONG
 
-# NtCreateThreadEx (Undocumented internal API)
+kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenThread.restype = wintypes.HANDLE
+kernel32.SuspendThread.argtypes = [wintypes.HANDLE]
+kernel32.SuspendThread.restype = wintypes.DWORD
+kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+kernel32.ResumeThread.restype = wintypes.DWORD
+kernel32.GetThreadContext.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+kernel32.GetThreadContext.restype = wintypes.BOOL
+kernel32.SetThreadContext.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+kernel32.SetThreadContext.restype = wintypes.BOOL
+
 ntdll.NtCreateThreadEx.argtypes = [
     ctypes.POINTER(wintypes.HANDLE), # ThreadHandle
     wintypes.DWORD,                 # DesiredAccess
@@ -74,6 +131,21 @@ ntdll.NtCreateThreadEx.argtypes = [
     wintypes.LPVOID                 # AttributeList
 ]
 ntdll.NtCreateThreadEx.restype = wintypes.DWORD # NTSTATUS
+
+# RtlCreateUserThread
+ntdll.RtlCreateUserThread.argtypes = [
+    wintypes.HANDLE,                # ProcessHandle
+    wintypes.LPVOID,                # SecurityDescriptor
+    wintypes.BOOL,                  # CreateSuspended
+    wintypes.ULONG,                 # StackZeroBits
+    ctypes.c_size_t,                # StackReserved
+    ctypes.c_size_t,                # StackCommit
+    wintypes.LPVOID,                # StartAddress
+    wintypes.LPVOID,                # StartParameter
+    ctypes.POINTER(wintypes.HANDLE), # ThreadHandle
+    wintypes.LPVOID                 # ClientID
+]
+ntdll.RtlCreateUserThread.restype = wintypes.DWORD # NTSTATUS
 
 
 if ctypes.sizeof(ctypes.c_void_p) == 8:
@@ -574,9 +646,8 @@ class DLLInjectorGUI:
 
     def _inject_sync(self, pid, dll_path, copy_hook=True, known_dir=None, known_cwd=None, suspended_state=False):
         """Synchronous version of injection logic for Ninja mode."""
-    def _inject_sync(self, pid, dll_path, copy_hook=True, known_dir=None, known_cwd=None, suspended_state=False):
-        """Synchronous version of injection logic for Ninja mode."""
         try:
+            is_target_64 = self._is_64bit_process(pid)
             # COPY OR SET GLOBAL
             if copy_hook:
                 if self.use_global_hook_path.get():
@@ -653,8 +724,29 @@ class DLLInjectorGUI:
                         h_thread = h_thread_val.value
                         self.log(f"Injection: NtCreateThreadEx SUCCESS (0x{h_thread:X})", "success")
                     else:
-                        self.log(f"Injection: NtCreateThreadEx failed. NTSTATUS: 0x{status:08X}", "error")
-                        return False, None
+                        self.log(f"Injection: NtCreateThreadEx failed (0x{status:08X}). Trying RtlCreateUserThread...", "warning")
+                        
+                        # RtlCreateUserThread Fallback
+                        h_thread_val = wintypes.HANDLE()
+                        status = ntdll.RtlCreateUserThread(
+                            h_process, None, False, 0, 0, 0,
+                            load_library_addr, dll_path_addr, ctypes.byref(h_thread_val), None
+                        )
+                        
+                        if status == 0:
+                            h_thread = h_thread_val.value
+                            self.log(f"Injection: RtlCreateUserThread SUCCESS (0x{h_thread:X})", "success")
+                        else:
+                            self.log(f"Injection: RtlCreateUserThread failed (0x{status:08X}). Trying Thread Hijacking...", "warning")
+                            
+                            # Final Fallback: Thread Hijacking
+                            success = self._hijack_thread(pid, dll_path, is_64=is_target_64)
+                            if success:
+                                self.log(f"Injection: Thread Hijacking initialized successfully!", "success")
+                                return True, None
+                            else:
+                                self.log(f"Injection: Thread Hijacking failed.", "error")
+                                return False, None
 
                 # If suspended, we cannot wait for it to finish (it won't). 
                 # We return Success + thread handle (or just close handle and return success)
@@ -869,13 +961,136 @@ class DLLInjectorGUI:
             log_func(f"Copy hook exception: {e}", "error")
             return False
 
+    def _hijack_thread(self, pid, dll_path, is_64):
+        """
+        Stealthy injection via Thread Hijacking (x64 only for now).
+        """
+        if not is_64:
+            self.log("Thread Hijacking: x86 not yet implemented in this method.", "error")
+            return False
+
+        h_process = None
+        h_thread = None
+        try:
+            h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+            if not h_process: return False
+
+            # 1. Find a thread
+            target_thread = None
+            for t in psutil.Process(pid).threads():
+                target_thread = t.id
+                break
+            
+            if not target_thread:
+                self.log("Thread Hijacking: No suitable thread found.", "error")
+                return False
+
+            h_thread = kernel32.OpenThread(THREAD_ALL_ACCESS, False, target_thread)
+            if not h_thread:
+                self.log(f"Thread Hijacking: OpenThread failed. Error: {ctypes.get_last_error()}", "error")
+                return False
+
+            # 2. Suspend thread
+            if kernel32.SuspendThread(h_thread) == 0xFFFFFFFF:
+                self.log("Thread Hijacking: Failed to suspend thread.", "error")
+                return False
+
+            # 3. Get Context
+            ctx = CONTEXT64()
+            ctx.ContextFlags = CONTEXT_FULL
+            if not kernel32.GetThreadContext(h_thread, ctypes.byref(ctx)):
+                self.log(f"Thread Hijacking: GetThreadContext failed. Error: {ctypes.get_last_error()}", "error")
+                kernel32.ResumeThread(h_thread)
+                return False
+
+            # 4. Allocate memory for DLL path and shellcode
+            dll_path_w = dll_path + "\x00"
+            dll_path_bytes = dll_path_w.encode('utf-16le')
+            
+            # Simple x64 shellcode:
+            # push rax; push rcx; push rdx; push r8; push r9; push r10; push r11
+            # sub rsp, 28h
+            # mov rcx, <dll_path_addr>
+            # mov rax, <load_library_addr>
+            # call rax
+            # add rsp, 28h
+            # pop r11; pop r10; pop r9; pop r8; pop rdx; pop rcx; pop rax
+            # jmp <original_rip>
+            
+            h_kernel32 = kernel32.GetModuleHandleW("kernel32.dll")
+            load_library_addr = kernel32.GetProcAddress(h_kernel32, b"LoadLibraryW")
+            
+            # Allocation
+            alloc_addr = kernel32.VirtualAllocEx(h_process, None, len(dll_path_bytes) + 128, MEM_COMMIT | MEM_RESERVE, 0x40) # PAGE_EXECUTE_READWRITE
+            if not alloc_addr:
+                kernel32.ResumeThread(h_thread)
+                return False
+                
+            path_addr = alloc_addr
+            shellcode_addr = alloc_addr + len(dll_path_bytes)
+            
+            # Write DLL Path
+            kernel32.WriteProcessMemory(h_process, path_addr, dll_path_bytes, len(dll_path_bytes), None)
+            
+            # Build Shellcode
+            import struct
+            sc = b"\x50\x51\x52\x41\x50\x41\x51\x41\x52\x41\x53" # push rax, rcx, rdx, r8, r9, r10, r11
+            sc += b"\x48\x83\xEC\x28" # sub rsp, 28h
+            sc += b"\x48\xB9" + struct.pack("<Q", path_addr) # mov rcx, path_addr
+            sc += b"\x48\xB8" + struct.pack("<Q", load_library_addr) # mov rax, load_library_addr
+            sc += b"\xFF\xD0" # call rax
+            sc += b"\x48\x83\xC4\x28" # add rsp, 28h
+            sc += b"\x41\x5B\x41\x5A\x41\x59\x41\x58\x5A\x59\x58" # pop r11, r10, r9, r8, rdx, rcx, rax
+            sc += b"\x48\xB8" + struct.pack("<Q", ctx.Rip) # mov rax, original_rip
+            sc += b"\xFF\xE0" # jmp rax
+            
+            kernel32.WriteProcessMemory(h_process, shellcode_addr, sc, len(sc), None)
+            
+            # 5. Hijack
+            ctx.Rip = shellcode_addr
+            if not kernel32.SetThreadContext(h_thread, ctypes.byref(ctx)):
+                self.log(f"Thread Hijacking: SetThreadContext failed. Error: {ctypes.get_last_error()}", "error")
+                kernel32.ResumeThread(h_thread)
+                return False
+                
+            # 6. Resume
+            kernel32.ResumeThread(h_thread)
+            self.log(f"Thread Hijacking: Thread {target_thread} hijacked successfully!", "success")
+            return True
+
+        except Exception as e:
+            self.log(f"Thread Hijacking Exception: {e}", "error")
+            return False
+        finally:
+            if h_thread: kernel32.CloseHandle(h_thread)
+            if h_process: kernel32.CloseHandle(h_process)
+
     def _is_64bit_process(self, pid):
         """
         Determines if a process is 64-bit.
         Returns True if 64-bit, False if 32-bit, None if unknown/failed.
         """
+        # FIRST: Check the EXE header on disk (Most reliable if OS is lying)
         try:
-            # Try Limited Query first (often works even for protected processes)
+            exe_path = psutil.Process(pid).exe()
+            if os.path.exists(exe_path):
+                with open(exe_path, "rb") as f:
+                    data = f.read(1024)
+                    if data.startswith(b'MZ'):
+                        # PE header offset is at 0x3C
+                        pe_offset = int.from_bytes(data[0x3C:0x40], "little")
+                        if len(data) > pe_offset + 6:
+                            # Signature 'PE\0\0' followed by Machine Type (2 bytes)
+                            machine = int.from_bytes(data[pe_offset+4:pe_offset+6], "little")
+                            if machine == 0x8664: # IMAGE_FILE_MACHINE_AMD64
+                                return True
+                            if machine == 0x014c: # IMAGE_FILE_MACHINE_I386
+                                return False
+        except Exception as e:
+            self.log(f"Arch check (PE): Failed reading {pid}'s EXE. {e}", "warning")
+
+        try:
+            # SECOND: Try Limited Query (API check)
             h_process = kernel32.OpenProcess(0x1000, False, pid) # PROCESS_QUERY_LIMITED_INFORMATION
             if not h_process:
                 # Fallback to standard Query
@@ -894,12 +1109,7 @@ class DLLInjectorGUI:
             kernel32.CloseHandle(h_process)
             
             # If IsWow64Process is TRUE, it's a 32-bit process on 64-bit Windows.
-            # If IsWow64Process is FALSE:
-            #   - It's a 64-bit process on 64-bit Windows.
-            #   - OR it's a 32-bit process on 32-bit Windows.
-            
             import platform
-            # Check host OS architecture
             is_os_64 = platform.machine().endswith("64")
             
             if is_os_64:
