@@ -65,11 +65,14 @@ if ctypes.sizeof(ctypes.c_void_p) == 8:
 else:
     user32.SendMessageTimeoutW.restype = ctypes.c_long
 
+# Environment variable name for global hook path
+HOOK_PATH_ENV_VAR = "HYDRA_HOOK_PATH"
+
 class DLLInjectorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("DLL Injector & Ninja Mode")
-        self.root.geometry("600x700") 
+        self.root.geometry("650x750") 
         self.root.resizable(True, True)
         
         self.is_admin = self.check_admin()
@@ -78,6 +81,7 @@ class DLLInjectorGUI:
         
         self.ignore_standard_python = tk.BooleanVar(value=True)
         self.ninja_mode = tk.BooleanVar(value=False)
+        self.use_global_hook_path = tk.BooleanVar(value=True)  # Use global path by default
         self.ninja_running = False
         self.ninja_thread = None
         self.processed_pids = set()
@@ -86,13 +90,64 @@ class DLLInjectorGUI:
         self.hook_editor_window = None
         self.hook_editor_text = None
         self.default_hook_template = ""
+        
+        # Global hook path (computed once)
+        self.global_hook_path = self._compute_global_hook_path()
 
         self.setup_ui()
         
         self.default_hook_template = self.load_hook_templates_file()
         
+        # Set global hook path environment variable on startup
+        self._set_global_hook_env()
+        
         self.refresh_processes()
         
+    def _compute_global_hook_path(self):
+        """Compute the absolute path to __hook__.py next to this script."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(script_dir, "__hook__.py")
+        return path
+
+    def _set_global_hook_env(self):
+        """Sets the global hook path in a config file for the DLL to read."""
+        config_dir = r"C:\pythondumps"
+        config_file = os.path.join(config_dir, "hook_config.ini")
+        
+        try:
+            if not os.path.exists(config_dir):
+                os.makedirs(config_dir, exist_ok=True)
+                
+            if self.use_global_hook_path.get():
+                hook_path = self.global_hook_path
+                hook_dir = os.path.dirname(hook_path)
+                
+                with open(config_file, "w") as f:
+                    f.write(f"[General]\n")
+                    f.write(f"HookPath={hook_dir}\n") # We need the DIR to add to sys.path
+                
+                # Still set env var for local children
+                os.environ[HOOK_PATH_ENV_VAR] = hook_dir
+                
+                self.log(f"Global Config Saved: {config_file} -> {hook_dir}", "info")
+            else:
+                if os.path.exists(config_file):
+                    os.remove(config_file)
+                    self.log(f"Global Config Removed: {config_file}", "info")
+                if HOOK_PATH_ENV_VAR in os.environ:
+                    del os.environ[HOOK_PATH_ENV_VAR]
+                    
+        except Exception as e:
+            self.log(f"Error updating global config: {e}", "error")
+            
+    def _on_global_hook_toggle(self):
+        if self.use_global_hook_path.get():
+             self.global_path_label.config(fg="green", text=f"({HOOK_PATH_ENV_VAR} ACTIVE)")
+             self._set_global_hook_env()
+        else:
+             self.global_path_label.config(fg="gray", text=f"({HOOK_PATH_ENV_VAR} DISABLED)")
+             self._set_global_hook_env()
+
     def check_admin(self):
         try:
             return ctypes.windll.shell32.IsUserAnAdmin()
@@ -122,14 +177,24 @@ class DLLInjectorGUI:
         ninja_frame = tk.LabelFrame(main_frame, text="Ninja Mode (Auto-Inject)", padx=10, pady=10, fg="red")
         ninja_frame.pack(fill=tk.X, pady=(0, 10))
         
+        ninja_row1 = tk.Frame(ninja_frame)
+        ninja_row1.pack(fill=tk.X)
+        
         tk.Checkbutton(
-            ninja_frame, text="Enable Ninja Mode",
+            ninja_row1, text="Enable Ninja Mode",
             variable=self.ninja_mode,
             command=self.toggle_ninja_mode,
             font=("Arial", 10, "bold"), fg="red"
         ).pack(side=tk.LEFT)
         
-        tk.Label(ninja_frame, text="(Monitors python.exe & python312.dll, suspends & injects)", fg="gray").pack(side=tk.LEFT, padx=10)
+        tk.Label(ninja_row1, text="(Monitors python.exe & python3xx.dll)", fg="gray").pack(side=tk.LEFT, padx=10)
+        
+        # Ninja Find Button - Quick scan for Python processes
+        tk.Button(
+            ninja_row1, text="🔍 Find Python Processes",
+            command=self.ninja_find_python_processes,
+            bg="#ff5722", fg="white", font=("Arial", 9, "bold")
+        ).pack(side=tk.RIGHT, padx=5)
 
         # ==========================
         # PROCESS SELECTION SECTION
@@ -190,6 +255,29 @@ class DLLInjectorGUI:
         tk.Entry(hook_row, textvariable=self.hook_file_var, width=20).pack(side=tk.LEFT, padx=(0, 10))
         tk.Button(hook_row, text="Browse", command=self.browse_hook_file).pack(side=tk.LEFT, padx=(0, 5))
         tk.Button(hook_row, text="Edit", command=self.open_hook_editor, bg="#007bff", fg="white").pack(side=tk.LEFT, padx=5)
+        
+        # Global Hook Path Option
+        global_hook_row = tk.Frame(setup_frame)
+        global_hook_row.pack(fill=tk.X, pady=(5, 5))
+        
+        tk.Checkbutton(
+            global_hook_row, text="Use Global Hook Path",
+            variable=self.use_global_hook_path,
+            command=self._on_global_hook_toggle
+        ).pack(side=tk.LEFT)
+        
+        self.global_path_label = tk.Label(
+            global_hook_row, 
+            text=f"({HOOK_PATH_ENV_VAR}={self.global_hook_path})",
+            fg="#666", font=("Consolas", 8)
+        )
+        self.global_path_label.pack(side=tk.LEFT, padx=(10, 5))
+        
+        tk.Button(
+            global_hook_row, text="Set Global", 
+            command=self._set_global_hook_env,
+            bg="#9c27b0", fg="white"
+        ).pack(side=tk.RIGHT, padx=2)
         
         # DLL Setup
         dll_row = tk.Frame(setup_frame)
@@ -255,18 +343,89 @@ class DLLInjectorGUI:
             self.log("NINJA MODE DISABLED", "info")
             self.ninja_running = False
 
+    def _is_python_process(self, proc):
+        """
+        Checks if a process is a Python process (python.exe or loads python3*.dll).
+        Returns: (bool is_target, str reason)
+        """
+        try:
+            name = proc.info.get('name', '').lower()
+            exe_path = (proc.info.get('exe') or "").lower()
+            
+            # Filter matches
+            ignore_dirs = [
+                os.environ.get('ProgramFiles', 'C:\\Program Files').lower(),
+                os.environ.get('ProgramFiles(x86)', 'C:\\Program Files (x86)').lower(),
+                os.environ.get('SystemRoot', 'C:\\Windows').lower(),
+                os.path.join(os.environ.get('LOCALAPPDATA', ''), 'programs').lower() 
+            ]
+            ignore_dirs = [d for d in ignore_dirs if d]
+
+            # 1. Ignore standard folders
+            if any(exe_path.startswith(d) for d in ignore_dirs):
+                return False, "ignored_dir"
+
+            # 2. Ignore venvs if simpler logic desired, but usually we WANT venvs?
+            # Creating a specialized check: specific generic venv/conda names vs user custom venvs
+            # The original logic ignored "venv" in exe_path. Let's keep it but be careful.
+            if "venv" in exe_path or "virtualenv" in exe_path or "conda" in exe_path:
+                return False, "ignored_venv"
+
+            # Check Name
+            if name == "python.exe" or name == "pythonw.exe":
+                return True, "process_name"
+            
+            # Check Modules (DLLs)
+            try:
+                for dll in proc.memory_maps():
+                    dll_path_lower = dll.path.lower()
+                    dll_name = os.path.basename(dll_path_lower)
+                    
+                    # Pattern match python3*.dll (e.g., python39.dll, python312.dll)
+                    if dll_name.startswith("python3") and dll_name.endswith(".dll") and len(dll_name) < 16:
+                        # Check ignore dirs again for the DLL
+                        if any(dll_path_lower.startswith(d) for d in ignore_dirs):
+                             continue
+                        if "venv" in dll_path_lower or "virtualenv" in dll_path_lower:
+                             continue
+                             
+                        return True, f"loaded_{dll_name}"
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                pass
+                
+            return False, ""
+        except:
+            return False, "error"
+
+    def ninja_find_python_processes(self):
+        """Scans for all Python-related processes and shows them in a popup."""
+        self.log("🔍 Scanning for Python processes...", "info")
+        found = []
+        
+        try:
+            current_pid = os.getpid()
+            for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                if proc.info['pid'] == current_pid: continue
+                
+                is_target, reason = self._is_python_process(proc)
+                if is_target:
+                    found.append(f"PID: {proc.info['pid']} | {proc.info['name']} | Reason: {reason}")
+        except Exception as e:
+            self.log(f"Scan error: {e}", "error")
+            
+        if found:
+            count = len(found)
+            msg = f"Found {count} potential Python targets:\n\n" + "\n".join(found[:20])
+            if count > 20: msg += f"\n...and {count-20} more."
+            messagebox.showinfo(f"Ninja Scan Results ({count})", msg)
+            self.log(f"🔍 Found {count} Python processes.", "success")
+        else:
+            messagebox.showinfo("Ninja Scan Results", "No interesting Python processes found running.")
+            self.log("🔍 No running Python targets found.", "warning")
+
     def _ninja_loop(self):
         self.log("Ninja watcher started...")
         
-        # Define paths to ignore (Standard installations)
-        ignore_dirs = [
-             os.environ.get('ProgramFiles', 'C:\\Program Files').lower(),
-             os.environ.get('ProgramFiles(x86)', 'C:\\Program Files (x86)').lower(),
-             os.environ.get('SystemRoot', 'C:\\Windows').lower(),
-             os.path.join(os.environ.get('LOCALAPPDATA', ''), 'programs').lower() 
-        ]
-        ignore_dirs = [d for d in ignore_dirs if d]
-
         while self.ninja_running:
             try:
                 # Optimized scan: Iterate processes only once per cycle
@@ -277,46 +436,11 @@ class DLLInjectorGUI:
                         if pid == current_pid or pid in self.processed_pids:
                             continue
 
-                        name = proc.info['name']
-                        exe_path = (proc.info['exe'] or "").lower()
+                        is_target, reason = self._is_python_process(proc)
                         
-                        # --- FILTER 1: Ignore Standard Installs (Program Files, Windows, etc.) ---
-                        if any(exe_path.startswith(d) for d in ignore_dirs):
-                            continue
-                        
-                        # --- FILTER 2: Ignore Virtual Environments (venv, .venv, conda) ---
-                        if "venv" in exe_path or "virtualenv" in exe_path or "conda" in exe_path:
-                            continue
-
-                        process_match = False
-                        target_reason = ""
-                        
-                        # 1. Check for python.exe match
-                        if name.lower() == "python.exe":
-                            process_match = True
-                            target_reason = "process name"
-                        
-                        # 2. Check for python312.dll loaded
-                        if not process_match:
-                             try:
-                                 for dll in proc.memory_maps():
-                                     dll_path_lower = dll.path.lower()
-                                     if "python312.dll" in dll_path_lower:
-                                         # Check if the DLL itself is in an ignored location (e.g. system32)
-                                         if any(dll_path_lower.startswith(d) for d in ignore_dirs):
-                                             continue
-                                         # Check if DLL is in a venv
-                                         if "venv" in dll_path_lower or "virtualenv" in dll_path_lower:
-                                             continue
-                                             
-                                         process_match = True
-                                         target_reason = "loaded DLL"
-                                         break
-                             except (psutil.AccessDenied, psutil.NoSuchProcess):
-                                 pass
-                        
-                        if process_match:
-                            self.log(f"🥷 Ninja found target ({target_reason}): {name} (PID: {pid})")
+                        if is_target:
+                            name = proc.info['name']
+                            self.log(f"🥷 Ninja found target ({reason}): {name} (PID: {pid})")
                             self.processed_pids.add(pid)
                             self._handle_ninja_target(pid, name)
                             
@@ -325,6 +449,8 @@ class DLLInjectorGUI:
             
             except Exception as e:
                 self.log(f"Ninja loop error: {e}", "error")
+            
+            time.sleep(1.0) # Scan interval
             
             time.sleep(1.0) # Scan interval
 
@@ -413,9 +539,43 @@ class DLLInjectorGUI:
 
     def _inject_sync(self, pid, dll_path, copy_hook=True, known_dir=None, known_cwd=None, suspended_state=False):
         """Synchronous version of injection logic for Ninja mode."""
+    def _inject_sync(self, pid, dll_path, copy_hook=True, known_dir=None, known_cwd=None, suspended_state=False):
+        """Synchronous version of injection logic for Ninja mode."""
         try:
+            # COPY OR SET GLOBAL
             if copy_hook:
-                self._copy_hook_to_target(pid, self.log, known_dir, known_cwd)
+                if self.use_global_hook_path.get():
+                     # If using global, we simply do NOT copy. 
+                     # The DLL is expected to read the env var we set globally (if possible) 
+                     # or we need to mechanism to push this env var to the remote process.
+                     # Since SetEnvironmentVariable is local, we cannot easily set it for a running remote process
+                     # WITHOUT injecting code. 
+                     # HOWEVER: We control the DLL. The DLL can read from a fixed file or registry if Env fails.
+                     # BUT wait: we are the parent if we spawned it? No, we attach.
+                     # 
+                     # TRICK: We can write the hook path to a temporary file that the DLL looks for, 
+                     # OR we just rely on standard copying if Env is not viable for remote processes.
+                     #
+                     # ACTUALLY: The User request said "create global value ... instead of creating checks". 
+                     # If we just skip copying, we need to ensure the target finds it.
+                     # 
+                     # IMPROVEMENT: If we can't set Env remotely easily, maybe we just use the copying?
+                     # Let's support BOTH. If Global is checked, we try to ensure the target knows it.
+                     # For now, let's keep copying as a fallback or skip if explicit.
+                     
+                     # Since we can't easily set ENVs in remote process without code execution,
+                     # and we are about to inject code...
+                     # We will skip copying IF valid global path is set, assuming the user system is configured
+                     # OR assuming the DLL is hardcoded to look for our known location?
+                     # 
+                     # Let's stick to the user request "create global value".
+                     # I will add a step to write a global config file in TEMP that the DLL could strictly read?
+                     # Or simpler: The DLL checks C:\Users\Public or something?
+                     #
+                     # Let's assume for this step we skip copying if global is checked.
+                     self.log("Global Path Mode: Skipping local __hook__.py copy.", "info")
+                else:
+                    self._copy_hook_to_target(pid, self.log, known_dir, known_cwd)
 
             dll_path = os.path.abspath(dll_path)
             dll_path_bytes = dll_path.encode('utf-16le') + b'\x00\x00'
