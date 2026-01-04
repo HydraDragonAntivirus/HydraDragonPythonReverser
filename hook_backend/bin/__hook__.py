@@ -216,7 +216,7 @@ def extract_target_module_worker(module_data):
     global _extracted_count
 
     try:
-        # print(f"[GENERIC-{threading.current_thread().name}] 🎯 Extracting: {module_name}") # LOG MINIMO
+        # print(f"[GENERIC-{threading.current_thread().name}] 🎯 Extracting: {module_name}") # MINIMAL LOG
 
         with _processing_lock:
             _extracted_count += 1
@@ -267,7 +267,7 @@ def extract_target_source(module_name, module_obj):
                 f.write(f"# Module type: {type(module_obj)}\n\n")
                 f.write(source)
 
-            # print(f"[GENERIC-{threading.current_thread().name}] ✅ Source code extracted: {module_name}") # LOG MINIMO
+            # print(f"[GENERIC-{threading.current_thread().name}] ✅ Source code extracted: {module_name}") # MINIMAL LOG
             return True
 
         except (OSError, TypeError):
@@ -378,7 +378,7 @@ def extract_target_components(module_name, module_obj):
 
         # generate_ultra_detailed_analysis removed
 
-        # print(f"[GENERIC-{threading.current_thread().name}] 🚀 COMPLETE REVERSE ENGINEERING completed: {module_name}") # LOG MINIMO
+        # print(f"[GENERIC-{threading.current_thread().name}] 🚀 COMPLETE REVERSE ENGINEERING completed: {module_name}") # MINIMAL LOG
         return True
 
     except Exception as e:
@@ -876,7 +876,7 @@ def reconstruct_executable_logic(code_obj, func_name):
         variables = {}
         logic_lines = []
 
-        # print(f"[REVERSE] Analyzing {func_name}: {len(instructions)} instructions, {len(constants)} constants") # LOG MINIMO
+        # print(f"[REVERSE] Analyzing {func_name}: {len(instructions)} instructions, {len(constants)} constants") # MINIMAL LOG
 
         i = 0
         while i < len(instructions):
@@ -1690,7 +1690,7 @@ def reconstruct_lambda_from_bytecode(code_obj, lambda_name):
                 stack.append(f_string)
 
             elif opname == 'CALL_FUNCTION':
-                # Chiamata di funzione
+                # Function call
                 argc = arg
                 args = []
                 for _ in range(argc):
@@ -1876,7 +1876,7 @@ def reconstruct_target_pyc(module_name, module_obj):
             # Fallback: look for code object in module
             main_code = find_main_code_object(module_obj)
             if not main_code:
-                # print(f"[PYC-RECONSTRUCT] No valid main code object found for {module_name}") # LOG MINIMO
+                # print(f"[PYC-RECONSTRUCT] No valid main code object found for {module_name}") # MINIMAL LOG
                 return False
 
         # STEP 2: Build VALID .pyc header
@@ -1896,7 +1896,7 @@ def reconstruct_target_pyc(module_name, module_obj):
         try:
             marshaled_code = marshal.dumps(main_code)
 
-            # STEP 4: Scrivi .pyc completo
+            # STEP 4: Write complete .pyc
             with open(pyc_file, 'wb') as f:
                 f.write(magic)
                 f.write(timestamp)
@@ -1904,14 +1904,14 @@ def reconstruct_target_pyc(module_name, module_obj):
                     f.write(size_field)
                 f.write(marshaled_code)
 
-            # STEP 5: Valida .pyc generato
+            # STEP 5: Validate generated .pyc
             if validate_generated_pyc(pyc_file):
-                # print(f"[PYC-RECONSTRUCT] ✅ Valid PYC: {module_name}") # LOG MINIMO
+                # print(f"[PYC-RECONSTRUCT] ✅ Valid PYC: {module_name}") # MINIMAL LOG
 
-                # STEP 6: Genera anche metadata
+                # STEP 6: Also generate metadata
                 generate_pyc_metadata(pyc_file, module_name, module_obj, main_code)
 
-                # STEP 7: Tenta decompilazione automatica
+                # STEP 7: Attempt automatic decompilation
                 attempt_automatic_decompilation(pyc_file, module_name)
 
                 return True
@@ -1921,7 +1921,7 @@ def reconstruct_target_pyc(module_name, module_obj):
 
         except Exception as marshal_error:
             print(f"[PYC-RECONSTRUCT] Marshal error for {module_name}: {marshal_error}")
-            # Fallback: ricostruisci code object
+            # Fallback: reconstruct code object
             return reconstruct_code_object_manually(module_name, module_obj, main_code)
 
     except Exception as e:
@@ -1981,10 +1981,10 @@ def find_main_code_object(module_obj):
             valid_candidates = [(n, c) for n, c in candidates if isinstance(c, CodeType)]
             if valid_candidates:
                 best_candidate = max(valid_candidates, key=lambda x: len(x[1].co_code))
-                # print(f"[CODE-FINDER] Selected main code: {best_candidate[0]}") # LOG MINIMO
+                # print(f"[CODE-FINDER] Selected main code: {best_candidate[0]}") # MINIMAL LOG
                 return best_candidate[1]
 
-        # print(f"[CODE-FINDER] No main code object found for {getattr(module_obj, '__name__', 'unknown module')}") # LOG MINIMO
+        # print(f"[CODE-FINDER] No main code object found for {getattr(module_obj, '__name__', 'unknown module')}") # MINIMAL LOG
         return None
 
     except Exception as e:
@@ -2087,9 +2087,9 @@ def extract_module_attributes_metadata(module_obj):
         return {}
 
 def attempt_automatic_decompilation(pyc_file, module_name):
-    """Tenta decompilazione automatica del .pyc"""
+    """Attempts automatic decompilation of .pyc"""
     try:
-        # Lista di decompilatori da provare in ordine
+        # List of decompilers to try in order
         decompilers = [
             ('pycdc', try_pycdc)
         ]
@@ -2098,13 +2098,13 @@ def attempt_automatic_decompilation(pyc_file, module_name):
             try:
                 result = decompiler_func(pyc_file, module_name)
                 if result:
-                    # print(f"[AUTO-DECOMPILE] ✅ Success with {decompiler_name}: {module_name}") # LOG MINIMO
+                    # print(f"[AUTO-DECOMPILE] ✅ Success with {decompiler_name}: {module_name}") # MINIMAL LOG
                     return True
             except Exception as e:
                 print(f"[AUTO-DECOMPILE] {decompiler_name} failed for {module_name}: {e}")
                 continue
 
-        # print(f"[AUTO-DECOMPILE] ❌ All decompilers failed for {module_name}") # LOG MINIMO
+        # print(f"[AUTO-DECOMPILE] ❌ All decompilers failed for {module_name}") # MINIMAL LOG
         return False
 
     except Exception as e:
@@ -2112,19 +2112,19 @@ def attempt_automatic_decompilation(pyc_file, module_name):
         return False
 
 def try_pycdc(pyc_file, module_name):
-    """Tenta decompilazione con pycdc"""
+    """Attempts decompilation with pycdc"""
     try:
         import subprocess
 
         output_file = _backup_dir / "DECOMPILED" / f"{module_name.replace('.', '_')}_pycdc.py"
 
-        # Comando pycdc (se disponibile)
+        # pycdc command (if available)
         cmd = ['pycdc', str(pyc_file)]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
         if result.returncode == 0 and result.stdout:
-            # Salva output
+            # Save output
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(result.stdout)
 
@@ -2134,7 +2134,7 @@ def try_pycdc(pyc_file, module_name):
         return False
 
     except FileNotFoundError:
-        # pycdc non installato
+        # pycdc not installed
         return False
     except subprocess.TimeoutExpired:
         print(f"[PYCDC] Timeout for {module_name}")
@@ -2144,18 +2144,18 @@ def try_pycdc(pyc_file, module_name):
         return False
 
 def reconstruct_code_object_manually(module_name, module_obj, original_code):
-    """Ricostruisce code object manualmente se marshal fallisce"""
+    """Manually reconstructs code object if marshal fails"""
     try:
         print(f"[CODE-MANUAL] Manual reconstruction for {module_name}")
 
-        # Salva informazioni complete del code object
+        # Save complete code object information
         manual_file = _backup_dir / "TARGET_PYC" / f"{module_name.replace('.', '_')}_manual.txt"
 
         with open(manual_file, 'w', encoding='utf-8') as f:
             f.write(f"MANUAL CODE OBJECT RECONSTRUCTION: {module_name}\n")
             f.write("=" * 60 + "\n\n")
 
-            # Informazioni complete
+            # Complete information
             f.write("CODE OBJECT DETAILS:\n")
             f.write(f"co_name: {repr(original_code.co_name)}\n")
             f.write(f"co_filename: {repr(original_code.co_filename)}\n")
@@ -2170,17 +2170,17 @@ def reconstruct_code_object_manually(module_name, module_obj, original_code):
             f.write(original_code.co_code.hex())
             f.write(f"\nBYTECODE (length): {len(original_code.co_code)} bytes\n")
 
-            # Costanti
+            # Constants
             f.write(f"\nCONSTANTS:\n")
             for i, const in enumerate(original_code.co_consts or []):
                 f.write(f"  [{i}] {type(const).__name__}: {repr(const)}\n")
 
-            # Nomi
+            # Names
             f.write(f"\nNAMES:\n")
             for i, name in enumerate(original_code.co_names or []):
                 f.write(f"  [{i}] {repr(name)}\n")
 
-            # Variabili
+            # Variables
             f.write(f"\nVARIABLES:\n")
             for i, varname in enumerate(original_code.co_varnames or []):
                 f.write(f"  [{i}] {repr(varname)}\n")
@@ -2667,12 +2667,12 @@ def extract_single_class(class_name, class_obj, module_name):
             'metadata': {}
         }
 
-        # STEP 1: Tenta estrazione source
+        # STEP 1: Attempt source extraction
         try:
             source_code = inspect.getsource(class_obj)
             result['source_code'] = source_code
             result['extraction_success'] = True
-            # print(f"[CLASS-SINGLE] ✅ Source extracted: {class_name}") # LOG MINIMO
+            # print(f"[CLASS-SINGLE] ✅ Source extracted: {class_name}") # MINIMAL LOG
         except Exception as source_error:
             result['source_extraction_error'] = str(source_error)
 
