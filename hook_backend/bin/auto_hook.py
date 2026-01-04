@@ -176,6 +176,7 @@ class DLLInjectorGUI:
         self.ninja_running = False
         self.ninja_thread = None
         self.processed_pids = set()
+        self.suspend_protection = tk.BooleanVar(value=True) # Enabled by default for Ninja Mode
         
         # --- Hook editor ---
         self.hook_editor_window = None
@@ -286,6 +287,15 @@ class DLLInjectorGUI:
             command=self.ninja_find_python_processes,
             bg="#ff5722", fg="white", font=("Arial", 9, "bold")
         ).pack(side=tk.RIGHT, padx=5)
+
+        ninja_row2 = tk.Frame(ninja_frame)
+        ninja_row2.pack(fill=tk.X, pady=(5, 0))
+        
+        tk.Checkbutton(
+            ninja_row2, text="🛡️ Bypass Usermode Protection (Suspend Parent/Guardian)",
+            variable=self.suspend_protection,
+            fg="darkred", font=("Arial", 9, "italic")
+        ).pack(side=tk.LEFT)
 
         # ==========================
         # PROCESS SELECTION SECTION
@@ -567,14 +577,16 @@ class DLLInjectorGUI:
     def _handle_ninja_target(self, pid, name):
         """Suspend, Copy Hook, Inject, Resume"""
         
-        # 0. PRE-FETCH paths
+        # 0. PRE-FETCH paths and parent info
         proc_dir = None
         proc_cwd = None
+        parent_pid = None
         try:
             proc = psutil.Process(pid)
             exe_path = proc.exe()
             proc_dir = os.path.dirname(exe_path)
             proc_cwd = proc.cwd()
+            parent_pid = proc.ppid()
         except:
             self.log(f"🥷 Could not fetch paths for {name}. Copy hook might fail.", "warning")
 
@@ -583,6 +595,29 @@ class DLLInjectorGUI:
         if not h_process:
             self.log(f"🥷 Failed to open {name} for suspension.", "error")
             return
+
+        # Optional: Suspend the parent (Protector) if enabled
+        h_parent = None
+        parent_suspended = False
+        if self.suspend_protection.get() and parent_pid and parent_pid > 0:
+            try:
+                p_proc = psutil.Process(parent_pid)
+                p_name = p_proc.name().lower()
+                
+                # Simple blacklist for system parents we SHOULD NOT suspend
+                system_parents = ["explorer.exe", "services.exe", "wininit.exe", "lsass.exe", "cmd.exe", "powershell.exe"]
+                if p_name not in system_parents:
+                    h_parent = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, parent_pid)
+                    if h_parent:
+                        status = ntdll.NtSuspendProcess(h_parent)
+                        if status == 0:
+                            self.log(f"🛡️ SUSPENDED PARENT/PROTECTOR: {p_name} (PID: {parent_pid})", "warning")
+                            parent_suspended = True
+                        else:
+                            kernel32.CloseHandle(h_parent)
+                            h_parent = None
+            except:
+                pass
 
         suspended = False
         try:
@@ -630,6 +665,14 @@ class DLLInjectorGUI:
                 self.log(f"🥷 Resuming {name}...", "warning")
                 ntdll.NtResumeProcess(h_process)
             
+            # Resume Parent/Protector if it was suspended
+            if parent_suspended and h_parent:
+                self.log(f"🛡️ Resuming Parent/Protector...", "info")
+                ntdll.NtResumeProcess(h_parent)
+                kernel32.CloseHandle(h_parent)
+            elif h_parent:
+                kernel32.CloseHandle(h_parent)
+                
             kernel32.CloseHandle(h_process)
             
             # 4. Post-Resume Verification (if we had a thread)

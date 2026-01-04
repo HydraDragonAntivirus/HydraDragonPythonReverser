@@ -40,6 +40,21 @@ static void dbgPrintf(const char *fmt, ...) {
   OutputDebugStringA(buf);
 }
 
+static void CheckForProtection() {
+  if (IsDebuggerPresent()) {
+    dbgPrintf("[HOOK] WARNING: Debugger detected!\n");
+  }
+
+  // Simple check for LoadLibraryW hook
+  HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+  if (hKernel32) {
+    BYTE *pLoadLib = (BYTE *)GetProcAddress(hKernel32, "LoadLibraryW");
+    if (pLoadLib && (*pLoadLib == 0xE9 || *pLoadLib == 0xEB)) {
+      dbgPrintf("[HOOK] WARNING: LoadLibraryW appears to be HOOKED (Jmp detected)!\n");
+    }
+  }
+}
+
 // Find python.exe in running processes
 static bool FindPythonExePath(char *outPath, size_t maxLen) {
   HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -304,6 +319,9 @@ static bool SetupStdoutStderrToLog(char *outLogPath) {
 DWORD WINAPI hookImpl(LPVOID lpParam) {
   // FIRST: Auto-detect and set PYTHONHOME before anything else
   AutoSetPythonHome();
+
+  // Check for common usermode protections/watchdogs
+  CheckForProtection();
 
   // Setup logging
   char logPathBuf[MAX_PATH] = {0};
