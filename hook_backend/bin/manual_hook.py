@@ -1,0 +1,694 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import ctypes
+from ctypes import wintypes
+import tkinter as tk
+from tkinter import filedialog, scrolledtext, messagebox, Toplevel, ttk
+import psutil
+import threading
+import os
+import sys
+import shutil
+import time
+
+# Windows API constants
+PROCESS_ALL_ACCESS = 0x1F0FFF
+MEM_COMMIT = 0x1000
+MEM_RESERVE = 0x2000
+PAGE_READWRITE = 0x04
+WM_SETTINGCHANGE = 0x001A
+HWND_BROADCAST = 0xFFFF
+SMTO_ABORTIFHUNG = 0x0002
+PROCESS_SUSPEND_RESUME = 0x0800
+
+# Load Windows DLLs
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+ntdll = ctypes.WinDLL('ntdll', use_last_error=True)
+
+# Define function signatures
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, 
+                                     wintypes.DWORD, wintypes.DWORD]
+kernel32.VirtualAllocEx.restype = wintypes.LPVOID
+kernel32.WriteProcessMemory.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.LPCVOID,
+                                         ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+kernel32.WriteProcessMemory.restype = wintypes.BOOL
+kernel32.CreateRemoteThread.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t,
+                                         wintypes.LPVOID, wintypes.LPVOID, wintypes.DWORD,
+                                         wintypes.LPDWORD]
+kernel32.CreateRemoteThread.restype = wintypes.HANDLE
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, wintypes.LPCSTR]
+kernel32.GetProcAddress.restype = wintypes.LPVOID
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
+kernel32.GetExitCodeThread.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
+kernel32.GetExitCodeThread.restype = wintypes.BOOL
+
+user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, 
+                                       wintypes.LPCWSTR, wintypes.UINT, wintypes.UINT, 
+                                       wintypes.LPVOID]
+
+ntdll.NtSuspendProcess.argtypes = [wintypes.HANDLE]
+ntdll.NtSuspendProcess.restype = wintypes.LONG
+ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+ntdll.NtResumeProcess.restype = wintypes.LONG
+
+
+if ctypes.sizeof(ctypes.c_void_p) == 8:
+    user32.SendMessageTimeoutW.restype = ctypes.c_longlong
+else:
+    user32.SendMessageTimeoutW.restype = ctypes.c_long
+
+class DLLInjectorGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("DLL Injector & Ninja Mode")
+        self.root.geometry("600x700") 
+        self.root.resizable(True, True)
+        
+        self.is_admin = self.check_admin()
+        self.default_dll_32 = "hook32.dll"
+        self.default_dll_64 = "hook64.dll"
+        
+        self.ignore_standard_python = tk.BooleanVar(value=True)
+        self.ninja_mode = tk.BooleanVar(value=False)
+        self.ninja_running = False
+        self.ninja_thread = None
+        self.processed_pids = set()
+        
+        # --- Hook editor ---
+        self.hook_editor_window = None
+        self.hook_editor_text = None
+        self.default_hook_template = ""
+
+        self.setup_ui()
+        
+        self.default_hook_template = self.load_hook_templates_file()
+        
+        self.refresh_processes()
+        
+    def check_admin(self):
+        try:
+            return ctypes.windll.shell32.IsUserAnAdmin()
+        except:
+            return False
+
+    def setup_ui(self):
+        """Build the simplified Tkinter GUI."""
+        
+        # --- Main Layout ---
+        main_frame = tk.Frame(self.root, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # --- Admin Warning ---
+        if not self.is_admin:
+            warning_frame = tk.Frame(main_frame, bg="#ffcccc", padx=10, pady=5)
+            warning_frame.pack(fill=tk.X, pady=(0, 10))
+            tk.Label(
+                warning_frame,
+                text="⚠ WARNING: Not running as Administrator! Injection & Suspension will fail.",
+                bg="#ffcccc", fg="#cc0000", font=("Arial", 10, "bold")
+            ).pack()
+
+        # ==========================
+        # NINJA MODE SECTION
+        # ==========================
+        ninja_frame = tk.LabelFrame(main_frame, text="Ninja Mode (Auto-Inject)", padx=10, pady=10, fg="red")
+        ninja_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Checkbutton(
+            ninja_frame, text="Enable Ninja Mode",
+            variable=self.ninja_mode,
+            command=self.toggle_ninja_mode,
+            font=("Arial", 10, "bold"), fg="red"
+        ).pack(side=tk.LEFT)
+        
+        tk.Label(ninja_frame, text="(Monitors python.exe & python312.dll, suspends & injects)", fg="gray").pack(side=tk.LEFT, padx=10)
+
+        # ==========================
+        # PROCESS SELECTION SECTION
+        # ==========================
+        process_frame = tk.LabelFrame(main_frame, text="Select Target Process", padx=10, pady=10)
+        process_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        search_frame = tk.Frame(process_frame)
+        search_frame.pack(fill=tk.X, pady=(0, 5))
+
+        tk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 5))
+        self.search_var = tk.StringVar()
+        self.search_var.trace("w", lambda *args: self.filter_processes())
+
+        search_entry = tk.Entry(search_frame, textvariable=self.search_var, width=30)
+        search_entry.pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Button(
+            search_frame, text="🔄 Refresh", command=self.refresh_processes,
+            bg="#4CAF50", fg="white", padx=10
+        ).pack(side=tk.LEFT, padx=5)
+        
+        tk.Checkbutton(
+            search_frame, text="Ignore Standard Installs",
+            variable=self.ignore_standard_python,
+            onvalue=True, offvalue=False
+        ).pack(side=tk.LEFT, padx=10)
+
+        tree_frame = tk.Frame(process_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = tk.Scrollbar(tree_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.tree = ttk.Treeview(
+            tree_frame, columns=("PID", "Name", "Arch", "Path"),
+            show="headings", yscrollcommand=scrollbar.set, height=10
+        )
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.tree.yview)
+
+        for col, width in zip(("PID", "Name", "Arch", "Path"), (60, 150, 50, 250)):
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=width)
+        self.tree.bind("<Double-1>", lambda e: self.quick_inject())
+
+        # ==========================
+        # HOOK / DLL SETUP SECTION
+        # ==========================
+        setup_frame = tk.LabelFrame(main_frame, text="Hook & DLL Setup", padx=10, pady=10)
+        setup_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Hook Setup
+        hook_row = tk.Frame(setup_frame)
+        hook_row.pack(fill=tk.X, pady=(0, 5))
+        self.hook_file_var = tk.StringVar(value="__hook__.py")
+        tk.Label(hook_row, text="Hook file:").pack(side=tk.LEFT, padx=(0, 5))
+        tk.Entry(hook_row, textvariable=self.hook_file_var, width=20).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Button(hook_row, text="Browse", command=self.browse_hook_file).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Button(hook_row, text="Edit", command=self.open_hook_editor, bg="#007bff", fg="white").pack(side=tk.LEFT, padx=5)
+        
+        # DLL Setup
+        dll_row = tk.Frame(setup_frame)
+        dll_row.pack(fill=tk.X, pady=5)
+        import platform
+        if platform.architecture()[0] == "64bit":
+            default_dll = getattr(self, "default_dll_64", "hook64.dll")
+        else:
+            default_dll = getattr(self, "default_dll_32", "hook32.dll")
+        self.dll_path_var = tk.StringVar(value=default_dll)
+        
+        tk.Label(dll_row, text="DLL:").pack(side=tk.LEFT, padx=(0, 5))
+        tk.Entry(dll_row, textvariable=self.dll_path_var, width=40).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        tk.Button(dll_row, text="Browse...", command=self.browse_dll).pack(side=tk.LEFT)
+
+        # Inject Button
+        self.inject_btn = tk.Button(
+            setup_frame, text="💉 INJECT DLL", command=self.inject_dll,
+            bg="#f44336", fg="white", font=("Arial", 12, "bold"),
+            padx=20, pady=5
+        )
+        self.inject_btn.pack(fill=tk.X, pady=(5, 0))
+
+        # ==========================
+        # LOGS SECTION
+        # ==========================
+        log_frame = tk.LabelFrame(main_frame, text="Logs", padx=10, pady=10)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame, height=8, state=tk.DISABLED,
+            bg="#1e1e1e", fg="#00ff00", font=("Consolas", 9)
+        )
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+        # Init Log
+        self.log("DLL Injector initialized")
+        if self.is_admin:
+            self.log("✓ Running as Administrator", "success")
+        else:
+            self.log("✗ Not running as Administrator - injection may fail!", "error")
+
+    def log(self, message, level="info"):
+        self.log_text.config(state=tk.NORMAL)
+        colors = {"info": "#00ff00", "success": "#00ff00", "error": "#ff0000", "warning": "#ffaa00"}
+        tag = f"tag_{level}"
+        self.log_text.tag_config(tag, foreground=colors.get(level, "#00ff00"))
+        timestamp = time.strftime("[%H:%M:%S] ")
+        self.log_text.insert(tk.END, f"{timestamp}{message}\n", tag)
+        self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
+
+    # ==========================
+    # NINJA MODE LOGIC
+    # ==========================
+    def toggle_ninja_mode(self):
+        if self.ninja_mode.get():
+            self.log("🥷 NINJA MODE ENABLED", "success")
+            self.ninja_running = True
+            self.ninja_thread = threading.Thread(target=self._ninja_loop, daemon=True)
+            self.ninja_thread.start()
+        else:
+            self.log("NINJA MODE DISABLED", "info")
+            self.ninja_running = False
+
+    def _ninja_loop(self):
+        self.log("Ninja watcher started...")
+        
+        # Define paths to ignore (Standard installations)
+        ignore_dirs = [
+             os.environ.get('ProgramFiles', 'C:\\Program Files').lower(),
+             os.environ.get('ProgramFiles(x86)', 'C:\\Program Files (x86)').lower(),
+             os.environ.get('SystemRoot', 'C:\\Windows').lower(),
+             os.path.join(os.environ.get('LOCALAPPDATA', ''), 'programs').lower() 
+        ]
+        ignore_dirs = [d for d in ignore_dirs if d]
+
+        while self.ninja_running:
+            try:
+                # Optimized scan: Iterate processes only once per cycle
+                current_pid = os.getpid()
+                for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                    try:
+                        pid = proc.info['pid']
+                        if pid == current_pid or pid in self.processed_pids:
+                            continue
+
+                        name = proc.info['name']
+                        exe_path = (proc.info['exe'] or "").lower()
+                        
+                        # --- FILTER 1: Ignore Standard Installs (Program Files, Windows, etc.) ---
+                        if any(exe_path.startswith(d) for d in ignore_dirs):
+                            continue
+                        
+                        # --- FILTER 2: Ignore Virtual Environments (venv, .venv, conda) ---
+                        if "venv" in exe_path or "virtualenv" in exe_path or "conda" in exe_path:
+                            continue
+
+                        process_match = False
+                        target_reason = ""
+                        
+                        # 1. Check for python.exe match
+                        if name.lower() == "python.exe":
+                            process_match = True
+                            target_reason = "process name"
+                        
+                        # 2. Check for python312.dll loaded
+                        if not process_match:
+                             try:
+                                 for dll in proc.memory_maps():
+                                     dll_path_lower = dll.path.lower()
+                                     if "python312.dll" in dll_path_lower:
+                                         # Check if the DLL itself is in an ignored location (e.g. system32)
+                                         if any(dll_path_lower.startswith(d) for d in ignore_dirs):
+                                             continue
+                                         # Check if DLL is in a venv
+                                         if "venv" in dll_path_lower or "virtualenv" in dll_path_lower:
+                                             continue
+                                             
+                                         process_match = True
+                                         target_reason = "loaded DLL"
+                                         break
+                             except (psutil.AccessDenied, psutil.NoSuchProcess):
+                                 pass
+                        
+                        if process_match:
+                            self.log(f"🥷 Ninja found target ({target_reason}): {name} (PID: {pid})")
+                            self.processed_pids.add(pid)
+                            self._handle_ninja_target(pid, name)
+                            
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+            
+            except Exception as e:
+                self.log(f"Ninja loop error: {e}", "error")
+            
+            time.sleep(1.0) # Scan interval
+
+    def _handle_ninja_target(self, pid, name):
+        """Suspend, Copy Hook, Inject, Resume"""
+        
+        # 0. PRE-FETCH paths
+        proc_dir = None
+        proc_cwd = None
+        try:
+            proc = psutil.Process(pid)
+            exe_path = proc.exe()
+            proc_dir = os.path.dirname(exe_path)
+            proc_cwd = proc.cwd()
+        except:
+            self.log(f"🥷 Could not fetch paths for {name}. Copy hook might fail.", "warning")
+
+        # 1. Suspend the process
+        h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        if not h_process:
+            self.log(f"🥷 Failed to open {name} for suspension.", "error")
+            return
+
+        suspended = False
+        try:
+            status = ntdll.NtSuspendProcess(h_process)
+            if status == 0: # STATUS_SUCCESS
+                self.log(f"🥷 Suspending {name} (PID: {pid})...", "warning")
+                suspended = True
+            else:
+                 self.log(f"🥷 NtSuspendProcess failed: {hex(status)}", "error")
+        except Exception as e:
+            self.log(f"🥷 Suspend exception: {e}", "error")
+
+        dll_path = None # scope var for later verification
+        
+        try:
+            # 2. Inject
+            self.log(f"🥷 Injecting into {name}...", "info")
+            
+            # Auto-detect Architecture
+            is_target_64 = self._is_64bit_process(pid)
+            dll_name = "hook64.dll" if is_target_64 else "hook32.dll"
+                
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            dll_path = os.path.join(script_dir, dll_name)
+            
+            if not os.path.exists(dll_path):
+                 dll_path = self.dll_path_var.get()
+
+            if os.path.exists(dll_path):
+                 # Pass suspended=True to indicate we shouldn't wait for thread completion yet
+                 success, h_thread = self._inject_sync(pid, dll_path, copy_hook=True, 
+                                             known_dir=proc_dir, known_cwd=proc_cwd,
+                                             suspended_state=suspended)
+                 
+                 if success:
+                     self.log(f"🥷 Ninja Injection Queued/Successful ({dll_name})!", "success")
+                 else:
+                     self.log(f"🥷 Ninja Injection Failed.", "error")
+            else:
+                self.log(f"🥷 DLL not found: {dll_path}", "error")
+
+        finally:
+            # 3. Resume
+            if suspended:
+                self.log(f"🥷 Resuming {name}...", "warning")
+                ntdll.NtResumeProcess(h_process)
+            
+            kernel32.CloseHandle(h_process)
+            
+            # 4. Post-Resume Verification (if we had a thread)
+            # We could wait for h_thread here if we returned it, but let's just check module
+            try:
+                time.sleep(0.5) # Give it a moment to load
+                loaded_modules = [m.path.lower() for m in psutil.Process(pid).memory_maps()]
+                if dll_path and dll_path.lower() in loaded_modules:
+                    self.log(f"✅ Verified: {os.path.basename(dll_path)} is loaded in target!", "success")
+                elif dll_path and any(os.path.basename(dll_path).lower() in m for m in loaded_modules):
+                     self.log(f"✅ Verified: {os.path.basename(dll_path)} name matches loaded module!", "success")
+                else:
+                     # This might happen if injection is slow or failed silently
+                     self.log(f"❓ DLL not yet visible in module list (might be loading)", "warning")
+            except:
+                pass
+
+    def _inject_sync(self, pid, dll_path, copy_hook=True, known_dir=None, known_cwd=None, suspended_state=False):
+        """Synchronous version of injection logic for Ninja mode."""
+        try:
+            if copy_hook:
+                self._copy_hook_to_target(pid, self.log, known_dir, known_cwd)
+
+            dll_path = os.path.abspath(dll_path)
+            dll_path_bytes = dll_path.encode('utf-16le') + b'\x00\x00'
+
+            h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+            if not h_process: return False, None
+
+            try:
+                dll_path_addr = kernel32.VirtualAllocEx(h_process, None, len(dll_path_bytes), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+                if not dll_path_addr: return False, None
+
+                if not kernel32.WriteProcessMemory(h_process, dll_path_addr, dll_path_bytes, len(dll_path_bytes), None):
+                     return False, None
+
+                h_kernel32 = kernel32.GetModuleHandleW("kernel32.dll")
+                load_library_addr = kernel32.GetProcAddress(h_kernel32, b"LoadLibraryW")
+
+                h_thread = kernel32.CreateRemoteThread(h_process, None, 0, load_library_addr, dll_path_addr, 0, None)
+                if not h_thread: return False, None
+
+                # If suspended, we cannot wait for it to finish (it won't). 
+                # We return Success + thread handle (or just close handle and return success)
+                if suspended_state:
+                     kernel32.CloseHandle(h_thread)
+                     return True, None
+                
+                kernel32.WaitForSingleObject(h_thread, 10000)
+                
+                # Check exit code
+                exit_code = ctypes.c_ulong(0)
+                kernel32.GetExitCodeThread(h_thread, ctypes.byref(exit_code))
+                
+                kernel32.CloseHandle(h_thread)
+                return exit_code.value != 0, None
+
+            finally:
+                kernel32.CloseHandle(h_process)
+        except Exception as e:
+            self.log(f"Injection error: {e}", "error")
+            import traceback
+            traceback.print_exc()
+            return False, None
+
+    # ==========================
+    # STANDARD LOGIC
+    # ==========================
+    def load_hook_templates_file(self):
+        templates_path = "__hook__.py" 
+        fallback_template = (
+            "# Default __hook__.py\n"
+            "import os, ctypes\n"
+            "MessageBox = ctypes.windll.user32.MessageBoxW\n"
+            "MessageBox(None, f'Hooked in PID: {os.getpid()}', 'Hook Success', 0)\n"
+        )
+        try:
+            with open(templates_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            return fallback_template
+        except Exception:
+            return fallback_template
+
+    def refresh_processes(self):
+        self.tree.delete(*self.tree.get_children())
+        self.all_processes = []
+        
+        for proc in psutil.process_iter(['pid', 'name', 'exe']):
+            try:
+                info = proc.info
+                pid = info['pid']
+                name = info['name']
+                exe = info['exe'] or "N/A"
+                
+                try:
+                    arch = "x64" if proc.is_running() and psutil.Process(pid).num_threads() > 0 else "x86"
+                except:
+                    arch = "?"
+                
+                self.all_processes.append((pid, name, arch, exe))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        
+        self.display_processes(self.all_processes)
+        self.log(f"Found {len(self.all_processes)} processes")
+    
+    def display_processes(self, processes):
+        self.tree.delete(*self.tree.get_children())
+        for pid, name, arch, exe in sorted(processes, key=lambda x: x[1].lower()):
+            self.tree.insert("", tk.END, values=(pid, name, arch, exe))
+    
+    def filter_processes(self):
+        search_term = self.search_var.get().lower()
+        if not search_term:
+            self.display_processes(self.all_processes)
+            return
+        
+        filtered = [p for p in self.all_processes 
+                    if search_term in p[1].lower() or search_term in str(p[0])]
+        self.display_processes(filtered)
+
+    def browse_hook_file(self):
+        filename = filedialog.askopenfilename(filetypes=[("Python files", "*.py"), ("All files", "*.*")])
+        if filename: self.hook_file_var.set(filename)
+
+    def browse_dll(self):
+        filename = filedialog.askopenfilename(filetypes=[("DLL files", "*.dll"), ("All files", "*.*")])
+        if filename: self.dll_path_var.set(filename)
+
+    def quick_inject(self):
+        self.inject_dll()
+
+    def inject_dll(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("No Selection", "Please select a process to inject into")
+            return
+        
+        item = self.tree.item(selected[0])
+        pid = int(item['values'][0])
+        name = item['values'][1]
+        dll_path = self.dll_path_var.get()
+        
+        if not os.path.exists(dll_path):
+            messagebox.showerror("DLL Not Found", f"DLL file not found:\n{dll_path}")
+            return
+        
+        self.inject_btn.config(state=tk.DISABLED, text="Injecting...")
+        threading.Thread(target=self._inject_thread, args=(pid, name, dll_path), daemon=True).start()
+
+    def _inject_thread(self, pid, name, dll_path):
+        try:
+            self.log(f"Starting injection into {name} (PID: {pid})")
+            
+            # Copy hook logic
+            self._copy_hook_to_target(pid, self.log)
+            
+            # Use the same synchronous logic but in this thread
+            success, _ = self._inject_sync(pid, dll_path, copy_hook=False)
+            
+            if success:
+                 self.log(f"✓✓✓ DLL INJECTED AND LOADED SUCCESSFULLY! ✓✓✓", "success")
+                 messagebox.showinfo("Success", f"DLL injected into {name}!")
+            else:
+                 self.log(f"Injection Failed or DLL load returned 0.", "error")
+                 messagebox.showerror("Error", "Injection failed. Check logs.")
+
+        except Exception as e:
+            self.log(f"Exception during injection: {e}", "error")
+        finally:
+            self.inject_btn.config(state=tk.NORMAL, text="💉 INJECT DLL")
+
+    def _copy_hook_to_target(self, pid, log_func, known_dir=None, known_cwd=None):
+        proc_dir = known_dir
+        cwd = known_cwd
+
+        if not proc_dir:
+            try:
+                proc = psutil.Process(pid)
+                exe_path = proc.exe()
+                proc_dir = os.path.dirname(exe_path)
+                cwd = proc.cwd()
+            except Exception as e:
+                log_func(f"Failed to get paths for PID {pid}: {e}", "warning")
+                # Fallback: cannot copy if we don't know where
+                return False
+
+        hook_file = self.hook_file_var.get()
+        
+        # Smart lookup: if not found (relative/absolute), check script directory
+        if not os.path.exists(hook_file):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            candidate = os.path.join(script_dir, hook_file)
+            if os.path.exists(candidate):
+                hook_file = candidate
+            # If default name, check script dir specifically
+            elif hook_file == "__hook__.py":
+                 candidate = os.path.join(script_dir, "__hook__.py")
+                 if os.path.exists(candidate):
+                     hook_file = candidate
+
+        if not os.path.exists(hook_file): 
+            log_func(f"Hook file not found: {hook_file}", "error")
+            return False
+
+        try:
+            import stat
+            if proc_dir:
+                dest = os.path.join(proc_dir, "__hook__.py")
+                shutil.copy2(hook_file, dest)
+                os.chmod(dest, stat.S_IREAD) # Make read-only to prevent deletion
+                log_func(f"Copied hook to: {dest} (Read-Only)", "success")
+            
+            if cwd and cwd != proc_dir:
+                dest_cwd = os.path.join(cwd, "__hook__.py")
+                shutil.copy2(hook_file, dest_cwd)
+                os.chmod(dest_cwd, stat.S_IREAD) # Make read-only
+                log_func(f"Copied hook to CWD: {dest_cwd} (Read-Only)", "success")
+                
+            return True
+        except Exception as e:
+            log_func(f"Copy hook exception: {e}", "error")
+            return False
+
+    def _is_64bit_process(self, pid):
+        """
+        Determines if a process is 64-bit.
+        Returns True if 64-bit, False if 32-bit.
+        """
+        try:
+            h_process = kernel32.OpenProcess(0x1000, False, pid) # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h_process:
+                return False
+                
+            is_wow64 = ctypes.c_int(0)
+            if not kernel32.IsWow64Process(h_process, ctypes.byref(is_wow64)):
+                kernel32.CloseHandle(h_process)
+                return False
+                
+            kernel32.CloseHandle(h_process)
+            
+            # If IsWow64Process is TRUE, it's a 32-bit process on 64-bit Windows.
+            # If IsWow64Process is FALSE:
+            #   - It's a 64-bit process on 64-bit Windows.
+            #   - OR it's a 32-bit process on 32-bit Windows (but we assume 64-bit Host OS).
+            
+            import platform
+            is_os_64 = platform.machine().endswith("64")
+            
+            if is_os_64:
+                 return not is_wow64.value
+            else:
+                 return False # 32-bit OS -> 32-bit process
+                 
+        except Exception as e:
+            self.log(f"Arch check failed for PID {pid}: {e}", "warning")
+            return False # Default to 32? Or 64?
+
+    def open_hook_editor(self):
+        if self.hook_editor_window and self.hook_editor_window.winfo_exists():
+            self.hook_editor_window.lift()
+            return
+        
+        self.hook_editor_window = Toplevel(self.root)
+        self.hook_editor_window.title(f"Hook Editor - {self.hook_file_var.get()}")
+        self.hook_editor_window.geometry("600x500")
+        
+        btn_frame = tk.Frame(self.hook_editor_window)
+        btn_frame.pack(fill=tk.X)
+        tk.Button(btn_frame, text="Save", command=self.save_hook_file_from_editor, bg="green", fg="white").pack(side=tk.LEFT)
+        
+        self.hook_editor_text = scrolledtext.ScrolledText(self.hook_editor_window, font=("Consolas", 10))
+        self.hook_editor_text.pack(fill=tk.BOTH, expand=True)
+        
+        try:
+            with open(self.hook_file_var.get(), "r") as f:
+                self.hook_editor_text.insert('1.0', f.read())
+        except:
+            pass
+
+    def save_hook_file_from_editor(self):
+        try:
+            with open(self.hook_file_var.get(), "w") as f:
+                f.write(self.hook_editor_text.get('1.0', tk.END))
+            messagebox.showinfo("Saved", "File saved.")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+if __name__ == "__main__":
+    if not ctypes.windll.shell32.IsUserAnAdmin():
+        # Re-run as admin
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+        sys.exit()
+
+    root = tk.Tk()
+    app = DLLInjectorGUI(root)
+    root.mainloop()
