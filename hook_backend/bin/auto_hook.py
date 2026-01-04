@@ -362,8 +362,9 @@ class DLLInjectorGUI:
             ignore_dirs = [d for d in ignore_dirs if d]
 
             # 1. Ignore standard folders
-            if any(exe_path.startswith(d) for d in ignore_dirs):
-                return False, "ignored_dir"
+            if self.ignore_standard_python.get():
+                if any(exe_path.startswith(d) for d in ignore_dirs):
+                    return False, "ignored_dir"
 
             # 2. Ignore venvs if simpler logic desired, but usually we WANT venvs?
             # Creating a specialized check: specific generic venv/conda names vs user custom venvs
@@ -398,9 +399,10 @@ class DLLInjectorGUI:
             return False, "error"
 
     def ninja_find_python_processes(self):
-        """Scans for all Python-related processes and shows them in a popup."""
+        """Scans for all Python-related processes and shows them in a popup + filters list."""
         self.log("🔍 Scanning for Python processes...", "info")
         found = []
+        found_data = [] # List of tuples for display_processes
         
         try:
             current_pid = os.getpid()
@@ -409,17 +411,33 @@ class DLLInjectorGUI:
                 
                 is_target, reason = self._is_python_process(proc)
                 if is_target:
-                    found.append(f"PID: {proc.info['pid']} | {proc.info['name']} | Reason: {reason}")
+                    pid = proc.info['pid']
+                    name = proc.info['name']
+                    exe = proc.info['exe'] or "N/A"
+                    
+                    try:
+                        # Reusing the simple arch check from refresh_processes
+                        arch = "x64" if proc.is_running() and psutil.Process(pid).num_threads() > 0 else "x86"
+                    except:
+                        arch = "?"
+                    
+                    found.append(f"PID: {pid} | {name} | Reason: {reason}")
+                    found_data.append((pid, name, arch, exe))
         except Exception as e:
             self.log(f"Scan error: {e}", "error")
             
         if found:
             count = len(found)
+            
+            # Update GUI List with only found processes
+            self.display_processes(found_data)
+            
             msg = f"Found {count} potential Python targets:\n\n" + "\n".join(found[:20])
             if count > 20: msg += f"\n...and {count-20} more."
             messagebox.showinfo(f"Ninja Scan Results ({count})", msg)
-            self.log(f"🔍 Found {count} Python processes.", "success")
+            self.log(f"🔍 Found {count} Python processes. List filtered.", "success")
         else:
+            self.display_processes([])
             messagebox.showinfo("Ninja Scan Results", "No interesting Python processes found running.")
             self.log("🔍 No running Python targets found.", "warning")
 
@@ -710,7 +728,10 @@ class DLLInjectorGUI:
             self.log(f"Starting injection into {name} (PID: {pid})")
             
             # Copy hook logic
-            self._copy_hook_to_target(pid, self.log)
+            if not self.use_global_hook_path.get():
+                self._copy_hook_to_target(pid, self.log)
+            else:
+                self.log("Global Path Mode: Skipping local __hook__.py copy.", "info")
             
             # Use the same synchronous logic but in this thread
             success, _ = self._inject_sync(pid, dll_path, copy_hook=False)

@@ -3369,9 +3369,99 @@ def cleanup_threads():
 
 
 def preserve_module_structure():
-    """Stub for module structure preservation"""
-    print("[TARGET] Preserving module structure (stub)")
-    pass
+    """Reconstructs the original directory structure from extracted modules"""
+    try:
+        print("[TARGET] Reconstructing module directory structure...")
+        
+        if not _backup_dir:
+            print("[TARGET] Backup directory not set, skipping structure reconstruction.")
+            return False
+
+        structure_dir = _backup_dir / "RECONSTRUCTED_STRUCTURE"
+        structure_dir.mkdir(parents=True, exist_ok=True)
+        
+        reconstructed_count = 0
+        
+        # Iterate over a copy of sys.modules keys to avoid runtime modification issues
+        for module_name, module_obj in list(sys.modules.items()):
+            try:
+                if not is_target_module(module_name, module_obj):
+                    continue
+                    
+                # Skip __main__ as it is handled separately usually
+                if module_name == '__main__':
+                    continue
+                
+                # Determine relative path
+                parts = module_name.split('.')
+                safe_name = module_name.replace('.', '_').replace('/', '_').replace('\\', '_')
+                
+                # Check if package
+                is_package = hasattr(module_obj, '__path__')
+                
+                if is_package:
+                    # pkg/subpkg/__init__.py
+                    rel_path = Path(*parts) / "__init__.py"
+                else:
+                    # pkg/module.py
+                    rel_path = Path(*parts[:-1]) / f"{parts[-1]}.py"
+                
+                # Full target directory
+                target_path = structure_dir / rel_path
+                try:
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+
+                # Find source content
+                # We look in MAIN_CODE where we dumped everything as flat files
+                # Naming convention there: safe_name.py or safe_name_RECONSTRUCTED.py
+                
+                source_content = ""
+                source_found = False
+                
+                # 1. Try extracted source
+                src_file_1 = _backup_dir / "MAIN_CODE" / f"{safe_name}.py"
+                if src_file_1.exists():
+                    try:
+                        with open(src_file_1, 'r', encoding='utf-8', errors='ignore') as f:
+                            source_content = f.read()
+                        source_found = True
+                    except: pass
+                    
+                # 2. Try reconstructed source
+                if not source_found:
+                    src_file_2 = _backup_dir / "MAIN_CODE" / f"{safe_name}_RECONSTRUCTED.py"
+                    if src_file_2.exists():
+                        try:
+                            with open(src_file_2, 'r', encoding='utf-8', errors='ignore') as f:
+                                source_content = f.read()
+                            source_found = True
+                        except: pass
+                
+                if source_found:
+                    with open(target_path, 'w', encoding='utf-8', errors='ignore') as f:
+                        f.write(source_content)
+                    reconstructed_count += 1
+                else:
+                    # Create placeholder if we identified it but failed to extract
+                    # Only create if it doesn't exist (avoid overwriting if multiple things map to same file?)
+                    if not target_path.exists():
+                        with open(target_path, 'w', encoding='utf-8') as f:
+                            f.write(f"# Placeholder for {module_name}\n")
+                            f.write(f"# Extraction failed or content not available\n")
+                        reconstructed_count += 1
+                    
+            except Exception as e:
+                # print(f"[STRUCTURE] Error processing {module_name}: {e}") # MINIMAL LOG
+                continue
+                
+        print(f"[TARGET] ✅ Structure reconstructed: {reconstructed_count} files created in {structure_dir}")
+        return True
+        
+    except Exception as e:
+        print(f"[TARGET] Structure reconstruction error: {e}")
+        return False
 
 def extract_using_variable_technique():
     """Stub for variable extraction technique"""
