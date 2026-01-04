@@ -278,12 +278,12 @@ static bool SetupStdoutStderrToLog(char *outLogPath) {
   char logPath[MAX_PATH];
   snprintf(logPath, MAX_PATH, "%s\\hook_dll.log", logDir);
 
-  // Fallback if C: is not writable? Unlikely but possible.
-  // Use Append mode
+  // Fallback to Public/pythondumps if C:\pythondumps fails
   g_logFile = fopen(logPath, "a");
   if (!g_logFile) {
-    // Fallback to local dir
-    snprintf(logPath, MAX_PATH, ".\\hook_dll.log");
+    char publicLogDir[] = "C:\\Users\\Public\\pythondumps";
+    CreateDirectoryA(publicLogDir, NULL);
+    snprintf(logPath, MAX_PATH, "%s\\hook_dll.log", publicLogDir);
     g_logFile = fopen(logPath, "a");
   }
 

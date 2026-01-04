@@ -167,7 +167,16 @@ def setup_target_extraction_directory():
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         # _backup_dir = Path.cwd() / f"GENERIC_CODE_EXTRACTED_{timestamp}"
-        _backup_dir = Path(r"C:\pythondumps") / f"dump_{timestamp}"
+        # Try C:\pythondumps first
+        base_path = Path(r"C:\pythondumps")
+        try:
+            base_path.mkdir(exist_ok=True, parents=True)
+        except:
+            # Fallback to C:\Users\Public\pythondumps
+            base_path = Path(r"C:\Users\Public\pythondumps")
+            base_path.mkdir(exist_ok=True, parents=True)
+            
+        _backup_dir = base_path / f"dump_{timestamp}"
         _backup_dir.mkdir(exist_ok=True, parents=True)
 
         # Essential directories

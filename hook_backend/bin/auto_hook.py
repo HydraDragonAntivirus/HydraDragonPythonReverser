@@ -437,7 +437,8 @@ class DLLInjectorGUI:
             messagebox.showinfo(f"Ninja Scan Results ({count})", msg)
             self.log(f"🔍 Found {count} Python processes. List filtered.", "success")
         else:
-            self.display_processes([])
+            # Do not clear the list if nothing found, just alert
+            # self.display_processes([]) 
             messagebox.showinfo("Ninja Scan Results", "No interesting Python processes found running.")
             self.log("🔍 No running Python targets found.", "warning")
 
@@ -715,6 +716,26 @@ class DLLInjectorGUI:
         pid = int(item['values'][0])
         name = item['values'][1]
         dll_path = self.dll_path_var.get()
+
+        # FIX: Auto-switch DLL based on target architecture
+        try:
+            is_target_64 = self._is_64bit_process(pid)
+            target_arch_str = "64-bit" if is_target_64 else "32-bit"
+            
+            dir_name = os.path.dirname(dll_path)
+            base_name = os.path.basename(dll_path).lower()
+            
+            new_dll = None
+            if is_target_64 and "hook32.dll" in base_name:
+                new_dll = os.path.join(dir_name, "hook64.dll")
+            elif not is_target_64 and "hook64.dll" in base_name:
+                new_dll = os.path.join(dir_name, "hook32.dll")
+                
+            if new_dll and os.path.exists(new_dll):
+                self.log(f"Auto-switching DLL to {os.path.basename(new_dll)} for {target_arch_str} target.", "warning")
+                dll_path = new_dll
+        except Exception as e:
+            self.log(f"Error checking architecture: {e}", "error")
         
         if not os.path.exists(dll_path):
             messagebox.showerror("DLL Not Found", f"DLL file not found:\n{dll_path}")
