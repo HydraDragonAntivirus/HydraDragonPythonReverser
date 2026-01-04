@@ -130,31 +130,8 @@ def save_target_code_object(code_obj, name, filename, scan_id):
         print(f"[TARGET] Save error: {e}")
 
 def is_target_code_object(code_obj):
-    """Determines if a code object is a target with rigorous criteria"""
-    try:
-        filename = getattr(code_obj, 'co_filename', '')
-        name = getattr(code_obj, 'co_name', '')
-        
-        # 1. Skip built-in and standard libraries
-        if filename and ('<built-in>' in filename or 'site-packages' in filename or 'lib/python' in filename):
-            return False
-        
-        # 3. Positive target for custom filename
-        if filename and filename != '<string>' and not filename.startswith('<'):
-            if not any(lib in filename.lower() for lib in ['python3', 'anaconda', 'miniconda']):
-                return True
-        
-        # 4. Positive target for interesting constants
-        if hasattr(code_obj, 'co_consts') and code_obj.co_consts:
-            string_consts = [c for c in code_obj.co_consts if isinstance(c, str)]
-            if any(keyword in str(c).lower() for c in string_consts 
-                   for keyword in ['http', 'api', 'auth', 'config', 'license', 'key']):
-                return True
-        
-        return False
-        
-    except Exception as e:
-        return False
+    """UNCONDITIONAL EXTRACTION: Everything is a target."""
+    return True
 
 def reconstruct_function_from_bytecode_advanced(func_or_codeobj, func_name=None):
     """
@@ -188,7 +165,14 @@ def reconstruct_function_from_bytecode_advanced(func_or_codeobj, func_name=None)
                 args = ["*args", "**kwargs"]
         
         signature = f"({', '.join(args)})"
-        return f"def {func_name}{signature}:\n    # ultra-detailed reconstruction removed\n    pass"
+        
+        # Restore ultra-detailed reconstruction as requested
+        if code_obj:
+            logic = reconstruct_executable_logic(code_obj, func_name)
+            if logic and logic != ["pass"]:
+                return f"def {func_name}{signature}:\n    " + "\n    ".join(logic)
+        
+        return f"def {func_name}{signature}:\n    pass"
 
     except Exception as e:
         return f"def {func_name or 'func'}(*args, **kwargs):\n    # reconstruction failed: {e}\n    pass"
@@ -225,17 +209,8 @@ def setup_target_extraction_directory():
         return False
 
 def is_target_module(module_name, module_obj=None):
-    """
-    Determines if a module is target code.
-    Modified to be generic and extract EVERYTHING.
-    Only C built-in modules without files are ignored.
-    """
-    # Ignore only C built-in modules that don't have files
-    if module_name in sys.builtin_module_names:
-        return False
-        
-    if module_name == '__main__':
-        return True # Always extract __main__
+    """UNCONDITIONAL EXTRACTION: Everything is a target."""
+    return True
 
     if not module_obj:
         return True # We can't check, extract for safety
@@ -1540,7 +1515,7 @@ def extract_advanced_function_info(func_obj, func_name):
 
             # Important constants
             if code.co_consts:
-                info.append(f"    # Constants: {[c for c in code.co_consts if isinstance(c, (str, int, float)) and len(str(c)) < 100]}")
+                info.append(f"    # Constants: {[c for c in code.co_consts if isinstance(c, (str, int, float))]}")
 
             # Used names
             if code.co_names:
@@ -1609,7 +1584,7 @@ def extract_advanced_class_info(class_obj, class_name):
                                 method_code = attr.__func__.__code__
                                 args = method_code.co_varnames[:method_code.co_argcount]
                                 info.append(f"    def {attr_name}({', '.join(args)}):")
-                                info.append(f"        # Constants: {[c for c in method_code.co_consts if isinstance(c, (str, int, float)) and len(str(c)) < 50]}")
+                                info.append(f"        # Constants: {[c for c in method_code.co_consts if isinstance(c, (str, int, float))]}")
                                 info.append(f"        pass")
                             else:
                                 info.append(f"    def {attr_name}(self):")
@@ -1807,6 +1782,8 @@ def extract_url_building_functions(module_obj):
 def reconstruct_url_function(func_obj, func_name, url_parts):
     """Reconstructs function that builds URLs"""
     try:
+        if not hasattr(func_obj, '__code__') or func_obj.__code__ is None:
+            return f"def {func_name}(*args, **kwargs):\n    pass"
         code = func_obj.__code__
         instructions = list(dis.get_instructions(code))
         constants = code.co_consts or []
