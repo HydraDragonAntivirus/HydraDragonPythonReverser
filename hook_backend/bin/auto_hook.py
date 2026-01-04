@@ -59,6 +59,22 @@ ntdll.NtSuspendProcess.restype = wintypes.LONG
 ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
 ntdll.NtResumeProcess.restype = wintypes.LONG
 
+# NtCreateThreadEx (Undocumented internal API)
+ntdll.NtCreateThreadEx.argtypes = [
+    ctypes.POINTER(wintypes.HANDLE), # ThreadHandle
+    wintypes.DWORD,                 # DesiredAccess
+    wintypes.LPVOID,                # ObjectAttributes
+    wintypes.HANDLE,                # ProcessHandle
+    wintypes.LPVOID,                # StartRoutine
+    wintypes.LPVOID,                # Argument
+    wintypes.ULONG,                 # CreateFlags (THREAD_CREATE_FLAGS_...)
+    ctypes.c_size_t,                # ZeroBits
+    ctypes.c_size_t,                # StackSize
+    ctypes.c_size_t,                # MaxStackSize
+    wintypes.LPVOID                 # AttributeList
+]
+ntdll.NtCreateThreadEx.restype = wintypes.DWORD # NTSTATUS
+
 
 if ctypes.sizeof(ctypes.c_void_p) == 8:
     user32.SendMessageTimeoutW.restype = ctypes.c_longlong
@@ -600,20 +616,45 @@ class DLLInjectorGUI:
             dll_path_bytes = dll_path.encode('utf-16le') + b'\x00\x00'
 
             h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
-            if not h_process: return False, None
+            if not h_process:
+                self.log(f"Injection: OpenProcess failed for PID {pid}. Error: {ctypes.get_last_error()}", "error")
+                return False, None
 
             try:
                 dll_path_addr = kernel32.VirtualAllocEx(h_process, None, len(dll_path_bytes), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
-                if not dll_path_addr: return False, None
+                if not dll_path_addr:
+                    self.log(f"Injection: VirtualAllocEx failed. Error: {ctypes.get_last_error()}", "error")
+                    return False, None
 
                 if not kernel32.WriteProcessMemory(h_process, dll_path_addr, dll_path_bytes, len(dll_path_bytes), None):
+                     self.log(f"Injection: WriteProcessMemory failed. Error: {ctypes.get_last_error()}", "error")
                      return False, None
 
                 h_kernel32 = kernel32.GetModuleHandleW("kernel32.dll")
                 load_library_addr = kernel32.GetProcAddress(h_kernel32, b"LoadLibraryW")
+                if not load_library_addr:
+                    self.log(f"Injection: GetProcAddress(LoadLibraryW) failed. Error: {ctypes.get_last_error()}", "error")
+                    return False, None
 
                 h_thread = kernel32.CreateRemoteThread(h_process, None, 0, load_library_addr, dll_path_addr, 0, None)
-                if not h_thread: return False, None
+                
+                if not h_thread:
+                    self.log(f"Injection: CreateRemoteThread failed (Error: {ctypes.get_last_error()}). Trying NtCreateThreadEx fallback...", "warning")
+                    
+                    # NtCreateThreadEx Fallback
+                    h_thread_val = wintypes.HANDLE()
+                    # THREAD_ALL_ACCESS = 0x1FFFFF
+                    status = ntdll.NtCreateThreadEx(
+                        ctypes.byref(h_thread_val), 0x1FFFFF, None, h_process, 
+                        load_library_addr, dll_path_addr, 0, 0, 0, 0, None
+                    )
+                    
+                    if status == 0: # STATUS_SUCCESS
+                        h_thread = h_thread_val.value
+                        self.log(f"Injection: NtCreateThreadEx SUCCESS (0x{h_thread:X})", "success")
+                    else:
+                        self.log(f"Injection: NtCreateThreadEx failed. NTSTATUS: 0x{status:08X}", "error")
+                        return False, None
 
                 # If suspended, we cannot wait for it to finish (it won't). 
                 # We return Success + thread handle (or just close handle and return success)
@@ -621,11 +662,15 @@ class DLLInjectorGUI:
                      kernel32.CloseHandle(h_thread)
                      return True, None
                 
-                kernel32.WaitForSingleObject(h_thread, 10000)
+                self.log(f"Injection: Thread active (0x{h_thread:X}). Waiting for completion...", "info")
+                wait_res = kernel32.WaitForSingleObject(h_thread, 10000)
+                if wait_res != 0: # WAIT_OBJECT_0
+                    self.log(f"Injection: WaitForSingleObject returned {wait_res}. Error: {ctypes.get_last_error()}", "warning")
                 
                 # Check exit code
                 exit_code = ctypes.c_ulong(0)
                 kernel32.GetExitCodeThread(h_thread, ctypes.byref(exit_code))
+                self.log(f"Injection: LoadLibraryW returned 0x{exit_code.value:X}", "info" if exit_code.value != 0 else "error")
                 
                 kernel32.CloseHandle(h_thread)
                 return exit_code.value != 0, None
@@ -720,20 +765,23 @@ class DLLInjectorGUI:
         # FIX: Auto-switch DLL based on target architecture
         try:
             is_target_64 = self._is_64bit_process(pid)
-            target_arch_str = "64-bit" if is_target_64 else "32-bit"
             
-            dir_name = os.path.dirname(dll_path)
-            base_name = os.path.basename(dll_path).lower()
-            
-            new_dll = None
-            if is_target_64 and "hook32.dll" in base_name:
-                new_dll = os.path.join(dir_name, "hook64.dll")
-            elif not is_target_64 and "hook64.dll" in base_name:
-                new_dll = os.path.join(dir_name, "hook32.dll")
+            # Only switch if we successfully determined the architecture
+            if is_target_64 is not None:
+                target_arch_str = "64-bit" if is_target_64 else "32-bit"
                 
-            if new_dll and os.path.exists(new_dll):
-                self.log(f"Auto-switching DLL to {os.path.basename(new_dll)} for {target_arch_str} target.", "warning")
-                dll_path = new_dll
+                dir_name = os.path.dirname(dll_path)
+                base_name = os.path.basename(dll_path).lower()
+                
+                new_dll = None
+                if is_target_64 and "hook32.dll" in base_name:
+                    new_dll = os.path.join(dir_name, "hook64.dll")
+                elif not is_target_64 and "hook64.dll" in base_name:
+                    new_dll = os.path.join(dir_name, "hook32.dll")
+                    
+                if new_dll and os.path.exists(new_dll):
+                    self.log(f"Auto-switching DLL to {os.path.basename(new_dll)} for {target_arch_str} target.", "warning")
+                    dll_path = new_dll
         except Exception as e:
             self.log(f"Error checking architecture: {e}", "error")
         
@@ -824,26 +872,34 @@ class DLLInjectorGUI:
     def _is_64bit_process(self, pid):
         """
         Determines if a process is 64-bit.
-        Returns True if 64-bit, False if 32-bit.
+        Returns True if 64-bit, False if 32-bit, None if unknown/failed.
         """
         try:
+            # Try Limited Query first (often works even for protected processes)
             h_process = kernel32.OpenProcess(0x1000, False, pid) # PROCESS_QUERY_LIMITED_INFORMATION
             if not h_process:
-                return False
+                # Fallback to standard Query
+                h_process = kernel32.OpenProcess(0x0400, False, pid) # PROCESS_QUERY_INFORMATION
+                
+            if not h_process:
+                self.log(f"Arch check: Failed to OpenProcess {pid}. Error: {ctypes.get_last_error()}", "warning")
+                return None
                 
             is_wow64 = ctypes.c_int(0)
             if not kernel32.IsWow64Process(h_process, ctypes.byref(is_wow64)):
+                self.log(f"Arch check: IsWow64Process failed for {pid}. Error: {ctypes.get_last_error()}", "warning")
                 kernel32.CloseHandle(h_process)
-                return False
+                return None
                 
             kernel32.CloseHandle(h_process)
             
             # If IsWow64Process is TRUE, it's a 32-bit process on 64-bit Windows.
             # If IsWow64Process is FALSE:
             #   - It's a 64-bit process on 64-bit Windows.
-            #   - OR it's a 32-bit process on 32-bit Windows (but we assume 64-bit Host OS).
+            #   - OR it's a 32-bit process on 32-bit Windows.
             
             import platform
+            # Check host OS architecture
             is_os_64 = platform.machine().endswith("64")
             
             if is_os_64:
@@ -853,7 +909,7 @@ class DLLInjectorGUI:
                  
         except Exception as e:
             self.log(f"Arch check failed for PID {pid}: {e}", "warning")
-            return False # Default to 32? Or 64?
+            return None
 
     def open_hook_editor(self):
         if self.hook_editor_window and self.hook_editor_window.winfo_exists():
