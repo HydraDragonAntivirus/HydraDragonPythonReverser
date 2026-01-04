@@ -106,6 +106,9 @@ ntdll.NtSuspendProcess.restype = wintypes.LONG
 ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
 ntdll.NtResumeProcess.restype = wintypes.LONG
 
+kernel32.QueueUserAPC.argtypes = [wintypes.LPVOID, wintypes.HANDLE, ctypes.c_void_p]
+kernel32.QueueUserAPC.restype = wintypes.DWORD
+
 kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.OpenThread.restype = wintypes.HANDLE
 kernel32.SuspendThread.argtypes = [wintypes.HANDLE]
@@ -737,7 +740,15 @@ class DLLInjectorGUI:
                             h_thread = h_thread_val.value
                             self.log(f"Injection: RtlCreateUserThread SUCCESS (0x{h_thread:X})", "success")
                         else:
-                            self.log(f"Injection: RtlCreateUserThread failed (0x{status:08X}). Trying Thread Hijacking...", "warning")
+                            self.log(f"Injection: RtlCreateUserThread failed (0x{status:08X}). Trying QueueUserAPC...", "warning")
+                            
+                            # Fallback 4: QueueUserAPC (Very safe)
+                            apc_success = self._inject_apc(pid, dll_path)
+                            if apc_success:
+                                self.log(f"Injection: QueueUserAPC queued successfully!", "success")
+                                return True, None
+                            
+                            self.log(f"Injection: QueueUserAPC failed. Trying Thread Hijacking...", "warning")
                             
                             # Final Fallback: Thread Hijacking
                             success = self._hijack_thread(pid, dll_path, is_64=is_target_64)
@@ -894,8 +905,20 @@ class DLLInjectorGUI:
             else:
                 self.log("Global Path Mode: Skipping local __hook__.py copy.", "info")
             
-            # Use the same synchronous logic but in this thread
-            success, _ = self._inject_sync(pid, dll_path, copy_hook=False)
+            # NEW: Suspend the process during manual injection to prevent watchdog interference
+            h_process = kernel32.OpenProcess(0x0800 | 0x1F0FFF, False, pid) # PROCESS_SUSPEND_RESUME | ALL_ACCESS
+            if h_process:
+                self.log(f"Suspending process {pid} for stable injection...", "warning")
+                ntdll.NtSuspendProcess(h_process)
+            
+            try:
+                # Use the same synchronous logic but in this thread
+                success, _ = self._inject_sync(pid, dll_path, copy_hook=False)
+            finally:
+                if h_process:
+                    self.log(f"Resuming process {pid}...", "warning")
+                    ntdll.NtResumeProcess(h_process)
+                    kernel32.CloseHandle(h_process)
             
             if success:
                  self.log(f"✓✓✓ DLL INJECTED AND LOADED SUCCESSFULLY! ✓✓✓", "success")
@@ -961,9 +984,49 @@ class DLLInjectorGUI:
             log_func(f"Copy hook exception: {e}", "error")
             return False
 
+    def _inject_apc(self, pid, dll_path):
+        """
+        Injects using QueueUserAPC. Very stable method.
+        """
+        h_process = None
+        try:
+            h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+            if not h_process: return False
+
+            dll_path_w = dll_path + "\x00"
+            dll_path_bytes = dll_path_w.encode('utf-16le')
+            
+            # Allocate space for path
+            path_addr = kernel32.VirtualAllocEx(h_process, None, len(dll_path_bytes), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+            if not path_addr: return False
+            
+            kernel32.WriteProcessMemory(h_process, path_addr, dll_path_bytes, len(dll_path_bytes), None)
+
+            h_kernel32 = kernel32.GetModuleHandleW("kernel32.dll")
+            load_library_addr = kernel32.GetProcAddress(h_kernel32, b"LoadLibraryW")
+
+            # Queue to all possible threads
+            success_count = 0
+            for t in psutil.Process(pid).threads():
+                h_thread = kernel32.OpenThread(THREAD_SET_CONTEXT, False, t.id)
+                if h_thread:
+                    if kernel32.QueueUserAPC(load_library_addr, h_thread, path_addr):
+                        success_count += 1
+                    kernel32.CloseHandle(h_thread)
+            
+            self.log(f"QueueUserAPC: Queued to {success_count} threads.", "info")
+            return success_count > 0
+
+        except Exception as e:
+            self.log(f"QueueUserAPC Exception: {e}", "error")
+            return False
+        finally:
+            if h_process: kernel32.CloseHandle(h_process)
+
     def _hijack_thread(self, pid, dll_path, is_64):
         """
-        Stealthy injection via Thread Hijacking (x64 only for now).
+        Stealthy injection via Thread Hijacking (x64 only).
+        Redesigned for stability (16-byte alignment + shadow space + flags save).
         """
         if not is_64:
             self.log("Thread Hijacking: x86 not yet implemented in this method.", "error")
@@ -975,15 +1038,14 @@ class DLLInjectorGUI:
             h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
             if not h_process: return False
 
-            # 1. Find a thread
-            target_thread = None
-            for t in psutil.Process(pid).threads():
-                target_thread = t.id
-                break
-            
-            if not target_thread:
-                self.log("Thread Hijacking: No suitable thread found.", "error")
+            # 1. Find a main or suitable thread
+            threads = sorted(psutil.Process(pid).threads(), key=lambda x: x.id)
+            if not threads:
+                self.log("Thread Hijacking: No threads found.", "error")
                 return False
+            
+            target_thread = threads[0].id
+            self.log(f"Thread Hijacking: Targeting thread {target_thread}", "info")
 
             h_thread = kernel32.OpenThread(THREAD_ALL_ACCESS, False, target_thread)
             if not h_thread:
@@ -1003,44 +1065,68 @@ class DLLInjectorGUI:
                 kernel32.ResumeThread(h_thread)
                 return False
 
-            # 4. Allocate memory for DLL path and shellcode
+            # 4. Prepare Memory
             dll_path_w = dll_path + "\x00"
             dll_path_bytes = dll_path_w.encode('utf-16le')
-            
-            # Simple x64 shellcode:
-            # push rax; push rcx; push rdx; push r8; push r9; push r10; push r11
-            # sub rsp, 28h
-            # mov rcx, <dll_path_addr>
-            # mov rax, <load_library_addr>
-            # call rax
-            # add rsp, 28h
-            # pop r11; pop r10; pop r9; pop r8; pop rdx; pop rcx; pop rax
-            # jmp <original_rip>
             
             h_kernel32 = kernel32.GetModuleHandleW("kernel32.dll")
             load_library_addr = kernel32.GetProcAddress(h_kernel32, b"LoadLibraryW")
             
-            # Allocation
-            alloc_addr = kernel32.VirtualAllocEx(h_process, None, len(dll_path_bytes) + 128, MEM_COMMIT | MEM_RESERVE, 0x40) # PAGE_EXECUTE_READWRITE
+            # Allocation (+256 for safety)
+            alloc_addr = kernel32.VirtualAllocEx(h_process, None, len(dll_path_bytes) + 256, MEM_COMMIT | MEM_RESERVE, 0x40) # PAGE_EXECUTE_READWRITE
             if not alloc_addr:
                 kernel32.ResumeThread(h_thread)
                 return False
                 
             path_addr = alloc_addr
-            shellcode_addr = alloc_addr + len(dll_path_bytes)
+            shellcode_addr = alloc_addr + len(dll_path_bytes) + (16 - (len(dll_path_bytes) % 16)) # Align shellcode start
             
             # Write DLL Path
             kernel32.WriteProcessMemory(h_process, path_addr, dll_path_bytes, len(dll_path_bytes), None)
             
-            # Build Shellcode
+            # Build ROBUST Shellcode (x64 ABI compliant)
             import struct
-            sc = b"\x50\x51\x52\x41\x50\x41\x51\x41\x52\x41\x53" # push rax, rcx, rdx, r8, r9, r10, r11
-            sc += b"\x48\x83\xEC\x28" # sub rsp, 28h
+            # 1. Save all GPRs and flags (128 bytes - 16 pushes)
+            sc = b"\x9C" # pushfq
+            sc += b"\x50\x51\x52\x53\x55\x56\x57" # rax, rcx, rdx, rbx, rbp, rsi, rdi
+            sc += b"\x41\x50\x41\x51\x41\x52\x41\x53\x41\x54\x41\x55\x41\x56\x41\x57" # r8-r15
+            
+            # 2. Save XMM0-XMM7 (Floating point state) - 8 * 16 = 128 bytes
+            sc += b"\x48\x83\xEC\x80" # sub rsp, 80h
+            for i in range(8):
+                # movdqu [rsp + i*16], xmmi
+                sc += b"\xF3\x0F\x7F" + bytes([0x04 + (i * 8 if i < 4 else (i-4) * 8), 0x24]) + bytes([i * 16]) if i > 0 else b"\xF3\x0F\x7F\x04\x24"
+            
+            # Note: For simplicity and space, we only save XMM0-XMM7 as they are volatile. 
+            # If s.exe uses more, we might need a larger buffer.
+            
+            # 3. Align stack to 16 bytes while saving current stack pointer in RBP
+            sc += b"\x48\x89\xE5" # mov rbp, rsp
+            sc += b"\x48\x83\xE4\xF0" # and rsp, -16
+            
+            # 4. Create shadow space (32 bytes) for LoadLibraryW
+            sc += b"\x48\x83\xEC\x20" # sub rsp, 20h
+            
+            # 5. Call LoadLibraryW
             sc += b"\x48\xB9" + struct.pack("<Q", path_addr) # mov rcx, path_addr
             sc += b"\x48\xB8" + struct.pack("<Q", load_library_addr) # mov rax, load_library_addr
             sc += b"\xFF\xD0" # call rax
-            sc += b"\x48\x83\xC4\x28" # add rsp, 28h
-            sc += b"\x41\x5B\x41\x5A\x41\x59\x41\x58\x5A\x59\x58" # pop r11, r10, r9, r8, rdx, rcx, rax
+            
+            # 6. Restore original RSP from RBP
+            sc += b"\x48\x89\xEC" # mov rsp, rbp
+            
+            # 7. Restore XMM0-XMM7
+            for i in range(8):
+                # movdqu xmmi, [rsp + i*16]
+                sc += b"\xF3\x0F\x6F" + bytes([0x04 + (i * 8 if i < 4 else (i-4) * 8), 0x24]) + bytes([i * 16]) if i > 0 else b"\xF3\x0F\x6F\x04\x24"
+            sc += b"\x48\x83\xC4\x80" # add rsp, 80h
+            
+            # 8. Pop GPRs in reverse order
+            sc += b"\x41\x5F\x41\x5E\x41\x5D\x41\x5C\x41\x5B\x41\x5A\x41\x59\x41\x58" # r15-r8
+            sc += b"\x5F\x5E\x5D\x5B\x5A\x59\x58" # rdi, rsi, rbp, rbx, rdx, rcx, rax
+            sc += b"\x9D" # popfq
+            
+            # 9. Jump back to original RIP
             sc += b"\x48\xB8" + struct.pack("<Q", ctx.Rip) # mov rax, original_rip
             sc += b"\xFF\xE0" # jmp rax
             
