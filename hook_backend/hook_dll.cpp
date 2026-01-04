@@ -7,13 +7,21 @@
  * ModuleNotFoundError for standard library modules like 'concurrent.futures'.
  */
 
-#include <psapi.h>
-#include <shlobj.h>
-#include <shlwapi.h>
-#include <stdio.h>
-#include <string.h> // For strcasecmp and strtok
-#include <tlhelp32.h>
 #include <windows.h>
+#include <psapi.h>
+#include <stdio.h>
+#include <string>
+#include <shlwapi.h>
+#include <tlhelp32.h>
+#include <direct.h>
+#include <shlobj.h>
+#include <vector>
+#include <algorithm>
+#include <string.h> // For strcasecmp and strtok
+
+#ifndef strcasecmp
+#define strcasecmp _stricmp
+#endif
 
 // Global storage for the detected PYTHONHOME path
 static char g_pythonHomePath[MAX_PATH] = {0};
