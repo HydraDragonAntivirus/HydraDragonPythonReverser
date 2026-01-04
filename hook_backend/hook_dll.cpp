@@ -487,6 +487,39 @@ DWORD WINAPI hookImpl(LPVOID lpParam) {
                          " - check traceback above\n");
       fflush(g_logFile);
     }
+    
+    // ATTEMPT TO CAPTURE TRACEBACK TO FILE
+    if (PyRun_SimpleString) {
+        // We use a raw string for the python script to avoid escaping hell
+        const char *errorLogScript = 
+            "import traceback, sys, os\n"
+            "try:\n"
+            "    log_path = r'C:\\pythondumps\\hook_import_error.log'\n"
+            "    # Fallback to Public if C:\\pythondumps not writable\n"
+            "    if not os.path.exists(r'C:\\pythondumps'):\n"
+            "        try: os.makedirs(r'C:\\pythondumps', exist_ok=True)\n"
+            "        except: log_path = r'C:\\Users\\Public\\pythondumps\\hook_import_error.log'\n"
+            "    \n"
+            "    # Ensure dir exists\n"
+            "    try: os.makedirs(os.path.dirname(log_path), exist_ok=True)\n"
+            "    except: pass\n"
+            "    \n"
+            "    with open(log_path, 'w', encoding='utf-8') as f:\n"
+            "        f.write('HOOK IMPORT FAILURE REPORT\\n')\n"
+            "        f.write('==========================\\n')\n"
+            "        f.write('Traceback:\\n')\n"
+            "        f.write(traceback.format_exc())\n"
+            "        f.write('\\nSYS.PATH:\\n')\n"
+            "        for p in sys.path: f.write(f'  {p}\\n')\n"
+            "        f.write('\\nSYS.META_PATH:\\n')\n"
+            "        for p in sys.meta_path: f.write(f'  {p}\\n')\n"
+            "        f.write('\\nSYS.MODULES (keys):\\n')\n"
+            "        f.write(str(list(sys.modules.keys())))\n"
+            "except Exception as e:\n"
+            "    pass\n";
+            
+        PyRun_SimpleString(errorLogScript);
+    }
 
     MessageBoxA(NULL,
                 "Failed to import " PYMODULE_NAME "\nCheck hook_output.log",

@@ -14,7 +14,40 @@ import threading
 import struct
 from pathlib import Path
 import importlib.util
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# Concurrent futures can fail in embedded environments
+try:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+except ImportError:
+    ThreadPoolExecutor = None
+    as_completed = None
+    print("[HOOK] WARNING: concurrent.futures unavailable - falling back to single thread")
+
+class DummyFuture:
+    def __init__(self, result=None):
+        self._result = result
+    def result(self):
+        return self._result
+    def done(self):
+        return True
+    def cancel(self):
+        return False
+
+class DummyExecutor:
+    def __init__(self, max_workers=None, thread_name_prefix=""):
+        pass
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+    def submit(self, fn, *args, **kwargs):
+        try:
+            res = fn(*args, **kwargs)
+            return DummyFuture(res)
+        except Exception as e:
+            print(f"[DummyExecutor] Task failed: {e}")
+            return DummyFuture(None)
+    def shutdown(self, wait=True):
+        pass
 from queue import Queue
 import traceback
 import inspect
@@ -3050,7 +3083,13 @@ def scan_existing_targets_with_complete_extraction():
                     for target in targets_found
                 }
 
-                for future in as_completed(future_to_module):
+                # Determine the iterator based on whether as_completed is available/needed
+                # This assumes 'as_completed' is imported from concurrent.futures
+                # If a dummy executor is used that doesn't require as_completed,
+                # 'future_to_module.keys()' would be a list of already-completed futures.
+                iterator = as_completed(future_to_module) if as_completed else future_to_module.keys()
+                
+                for future in iterator:
                     module_name = future_to_module[future]
                     try:
                         result = future.result()
@@ -3334,7 +3373,15 @@ def extraction_queue_processor():
     thread_name = threading.current_thread().name
     print(f"[TARGET-{thread_name}] Queue processor started")
     
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_EXTRACTIONS, thread_name_prefix="QueueExtract") as executor:
+    # Start extraction pool
+    # Fallback if ThreadPoolExecutor is None (e.g., if it was mocked out for testing)
+    if ThreadPoolExecutor:
+        _extraction_pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_EXTRACTIONS, thread_name_prefix="QueueExtract")
+    else:
+        _extraction_pool = None
+        print("[HOOK] Running in synchronous mode (No ThreadPool)")
+
+    with _extraction_pool if _extraction_pool else DummyExecutor() as executor: # DummyExecutor would execute tasks synchronously
         while _extractor_active:
             try:
                 # Get from queue with timeout
