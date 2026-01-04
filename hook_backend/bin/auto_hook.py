@@ -687,6 +687,7 @@ class DLLInjectorGUI:
                     self._copy_hook_to_target(pid, self.log, known_dir, known_cwd)
 
             dll_path = os.path.abspath(dll_path)
+            self.log(f"Injection: Full DLL path set to: {dll_path}", "info")
             dll_path_bytes = dll_path.encode('utf-16le') + b'\x00\x00'
 
             h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
@@ -1084,24 +1085,20 @@ class DLLInjectorGUI:
             # Write DLL Path
             kernel32.WriteProcessMemory(h_process, path_addr, dll_path_bytes, len(dll_path_bytes), None)
             
-            # Build ROBUST Shellcode (x64 ABI compliant)
+            # Build ROBUST Shellcode (x64 ABI compliant + FXSAVE)
             import struct
             # 1. Save all GPRs and flags (128 bytes - 16 pushes)
             sc = b"\x9C" # pushfq
             sc += b"\x50\x51\x52\x53\x55\x56\x57" # rax, rcx, rdx, rbx, rbp, rsi, rdi
             sc += b"\x41\x50\x41\x51\x41\x52\x41\x53\x41\x54\x41\x55\x41\x56\x41\x57" # r8-r15
             
-            # 2. Save XMM0-XMM7 (Floating point state) - 8 * 16 = 128 bytes
-            sc += b"\x48\x83\xEC\x80" # sub rsp, 80h
-            for i in range(8):
-                # movdqu [rsp + i*16], xmmi
-                sc += b"\xF3\x0F\x7F" + bytes([0x04 + (i * 8 if i < 4 else (i-4) * 8), 0x24]) + bytes([i * 16]) if i > 0 else b"\xF3\x0F\x7F\x04\x24"
-            
-            # Note: For simplicity and space, we only save XMM0-XMM7 as they are volatile. 
-            # If s.exe uses more, we might need a larger buffer.
-            
-            # 3. Align stack to 16 bytes while saving current stack pointer in RBP
+            # 2. Save FPU/SSE/XMM state (512 bytes)
+            # 16 GPR pushes * 8 bytes = 128 bytes (Already 16-aligned)
             sc += b"\x48\x89\xE5" # mov rbp, rsp
+            sc += b"\x48\x81\xEC\x00\x02\x00\x00" # sub rsp, 512 (0x200)
+            sc += b"\x48\x0F\xAE\x04\x24" # fxsave64 [rsp]
+            
+            # 3. Align stack again for Windows ABI (just in case)
             sc += b"\x48\x83\xE4\xF0" # and rsp, -16
             
             # 4. Create shadow space (32 bytes) for LoadLibraryW
@@ -1112,14 +1109,13 @@ class DLLInjectorGUI:
             sc += b"\x48\xB8" + struct.pack("<Q", load_library_addr) # mov rax, load_library_addr
             sc += b"\xFF\xD0" # call rax
             
-            # 6. Restore original RSP from RBP
+            # 6. Restore original RSP from RBP (skipping shadow/align)
             sc += b"\x48\x89\xEC" # mov rsp, rbp
             
-            # 7. Restore XMM0-XMM7
-            for i in range(8):
-                # movdqu xmmi, [rsp + i*16]
-                sc += b"\xF3\x0F\x6F" + bytes([0x04 + (i * 8 if i < 4 else (i-4) * 8), 0x24]) + bytes([i * 16]) if i > 0 else b"\xF3\x0F\x6F\x04\x24"
-            sc += b"\x48\x83\xC4\x80" # add rsp, 80h
+            # 7. Restore FPU/SSE state
+            sc += b"\x48\x81\xEC\x00\x02\x00\x00" # sub rsp, 512
+            sc += b"\x48\x0F\xAE\x14\x24" # fxrstor64 [rsp]
+            sc += b"\x48\x81\xC4\x00\x02\x00\x00" # add rsp, 512
             
             # 8. Pop GPRs in reverse order
             sc += b"\x41\x5F\x41\x5E\x41\x5D\x41\x5C\x41\x5B\x41\x5A\x41\x59\x41\x58" # r15-r8
