@@ -692,6 +692,9 @@ class DLLInjectorGUI:
             if is_target_64 is None:
                 self.log("Injection aborted: Unable to determine target architecture (process may have exited)", "warning")
                 return False, None
+
+            if not self._verify_process_live(pid, None, "injection setup"):
+                return False, None
             # COPY OR SET GLOBAL
             if copy_hook:
                 if self.use_global_hook_path.get():
@@ -734,6 +737,11 @@ class DLLInjectorGUI:
             h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
             if not h_process:
                 self.log(f"Injection: OpenProcess failed for PID {pid}. Error: {ctypes.get_last_error()}", "error")
+                return False, None
+
+            # Re-check the process state with a handle to avoid injecting into a terminating process
+            if not self._verify_process_live(pid, None, "post-open"):
+                kernel32.CloseHandle(h_process)
                 return False, None
 
             try:
@@ -988,6 +996,9 @@ class DLLInjectorGUI:
             if not psutil.pid_exists(pid):
                 self.log(f"Injection aborted: PID {pid} vanished before start", "warning")
                 messagebox.showerror("Process Exited", f"{name} is no longer running.")
+                return
+
+            if not self._verify_process_live(pid, name, "manual injection"):
                 return
 
             # Copy hook logic
@@ -1366,6 +1377,24 @@ class DLLInjectorGUI:
         except Exception as e:
             self.log(f"DLL arch check failed for {dll_path}: {e}", "warning")
         return None
+
+    def _verify_process_live(self, pid, name=None, stage=""):
+        """Confirm the process is still alive enough for injection work."""
+        try:
+            proc = psutil.Process(pid)
+            if not proc.is_running() or proc.status() in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+                self.log(
+                    f"Injection aborted during {stage}: PID {pid} ({name or proc.name()}) is terminating (status={proc.status()})",
+                    "warning",
+                )
+                return False
+            return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            self.log(
+                f"Injection aborted during {stage}: PID {pid} ({name or 'unknown'}) disappeared or is inaccessible",
+                "warning",
+            )
+            return False
 
     def open_hook_editor(self):
         if self.hook_editor_window and self.hook_editor_window.winfo_exists():
