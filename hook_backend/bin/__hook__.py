@@ -212,21 +212,6 @@ def is_target_module(module_name, module_obj=None):
     """UNCONDITIONAL EXTRACTION: Everything is a target."""
     return True
 
-    if not module_obj:
-        return True # We can't check, extract for safety
-
-    try:
-        # Do not extract modules that do not have a source file (often C built-in)
-        # unless they are a package (which has a __path__)
-        if not hasattr(module_obj, '__file__') or not module_obj.__file__:
-            if not hasattr(module_obj, '__path__'):
-                return False
-    except Exception:
-        pass # Extract if there are problems
-        
-    # If it has a file, is a package, or we're unsure, extract.
-    return True
-
 def extract_target_module_worker(module_data):
     """Worker for target module extraction - FOR THREAD POOL"""
     module_name, module_obj = module_data
