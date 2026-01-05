@@ -98,6 +98,10 @@ kernel32.WaitForSingleObject.restype = wintypes.DWORD
 kernel32.GetExitCodeThread.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
 kernel32.GetExitCodeThread.restype = wintypes.BOOL
 
+# Architecture helpers
+kernel32.IsWow64Process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+kernel32.IsWow64Process.restype = wintypes.BOOL
+
 user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, 
                                        wintypes.LPCWSTR, wintypes.UINT, wintypes.UINT, 
                                        wintypes.LPVOID]
@@ -623,6 +627,12 @@ class DLLInjectorGUI:
             
             # Auto-detect Architecture
             is_target_64 = self._is_64bit_process(pid)
+            if is_target_64 is None:
+                self.log(
+                    "🥷 Ninja Injection skipped: Unable to determine target architecture (process may have exited)",
+                    "warning",
+                )
+                return
             dll_name = "hook64.dll" if is_target_64 else "hook32.dll"
                 
             script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -679,6 +689,12 @@ class DLLInjectorGUI:
         """Synchronous version of injection logic for Ninja mode."""
         try:
             is_target_64 = self._is_64bit_process(pid)
+            if is_target_64 is None:
+                self.log("Injection aborted: Unable to determine target architecture (process may have exited)", "warning")
+                return False, None
+
+            if not self._verify_process_live(pid, None, "injection setup"):
+                return False, None
             # COPY OR SET GLOBAL
             if copy_hook:
                 if self.use_global_hook_path.get():
@@ -721,6 +737,11 @@ class DLLInjectorGUI:
             h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
             if not h_process:
                 self.log(f"Injection: OpenProcess failed for PID {pid}. Error: {ctypes.get_last_error()}", "error")
+                return False, None
+
+            # Re-check the process state with a handle to avoid injecting into a terminating process
+            if not self._verify_process_live(pid, None, "post-open"):
+                kernel32.CloseHandle(h_process)
                 return False, None
 
             try:
@@ -905,31 +926,65 @@ class DLLInjectorGUI:
         dll_path = self.dll_path_var.get()
 
         # FIX: Auto-switch DLL based on target architecture
+        is_target_64 = None
         try:
             is_target_64 = self._is_64bit_process(pid)
-            
+
+            if is_target_64 is None:
+                self.log(
+                    "Injection aborted: Unable to determine target architecture (process may have exited)",
+                    "warning",
+                )
+                return
+
             # Only switch if we successfully determined the architecture
-            if is_target_64 is not None:
-                target_arch_str = "64-bit" if is_target_64 else "32-bit"
-                
-                dir_name = os.path.dirname(dll_path)
-                base_name = os.path.basename(dll_path).lower()
-                
-                new_dll = None
-                if is_target_64 and "hook32.dll" in base_name:
-                    new_dll = os.path.join(dir_name, "hook64.dll")
-                elif not is_target_64 and "hook64.dll" in base_name:
-                    new_dll = os.path.join(dir_name, "hook32.dll")
-                    
-                if new_dll and os.path.exists(new_dll):
-                    self.log(f"Auto-switching DLL to {os.path.basename(new_dll)} for {target_arch_str} target.", "warning")
-                    dll_path = new_dll
+            target_arch_str = "64-bit" if is_target_64 else "32-bit"
+
+            dir_name = os.path.dirname(dll_path)
+            base_name = os.path.basename(dll_path).lower()
+
+            new_dll = None
+            if is_target_64 and "hook32.dll" in base_name:
+                new_dll = os.path.join(dir_name, "hook64.dll")
+            elif not is_target_64 and "hook64.dll" in base_name:
+                new_dll = os.path.join(dir_name, "hook32.dll")
+
+            if new_dll and os.path.exists(new_dll):
+                self.log(f"Auto-switching DLL to {os.path.basename(new_dll)} for {target_arch_str} target.", "warning")
+                dll_path = new_dll
         except Exception as e:
             self.log(f"Error checking architecture: {e}", "error")
-        
+
         if not os.path.exists(dll_path):
             messagebox.showerror("DLL Not Found", f"DLL file not found:\n{dll_path}")
             return
+
+        # Abort if we know the architecture mismatch could crash the target
+        dll_arch = self._detect_dll_architecture(dll_path)
+        if is_target_64 is not None:
+            if dll_arch is None:
+                self.log(
+                    "Unable to determine DLL architecture; refusing injection to avoid crashing the target.",
+                    "error",
+                )
+                messagebox.showerror(
+                    "Unknown Architecture",
+                    "Could not determine the selected DLL's architecture. Please choose a known 32-bit or 64-bit DLL.",
+                )
+                return
+
+            expected_arch = "64" if is_target_64 else "32"
+            if dll_arch != expected_arch:
+                self.log(
+                    f"Architecture mismatch: target is {'64' if is_target_64 else '32'}-bit but DLL appears to be {dll_arch}-bit.",
+                    "error"
+                )
+                messagebox.showerror(
+                    "Architecture Mismatch",
+                    f"Selected DLL architecture ({dll_arch}-bit) does not match target process ({'64' if is_target_64 else '32'}-bit).\n"
+                    "Choose the correct DLL to avoid crashes."
+                )
+                return
         
         self.inject_btn.config(state=tk.DISABLED, text="Injecting...")
         threading.Thread(target=self._inject_thread, args=(pid, name, dll_path), daemon=True).start()
@@ -937,7 +992,15 @@ class DLLInjectorGUI:
     def _inject_thread(self, pid, name, dll_path):
         try:
             self.log(f"Starting injection into {name} (PID: {pid})")
-            
+
+            if not psutil.pid_exists(pid):
+                self.log(f"Injection aborted: PID {pid} vanished before start", "warning")
+                messagebox.showerror("Process Exited", f"{name} is no longer running.")
+                return
+
+            if not self._verify_process_live(pid, name, "manual injection"):
+                return
+
             # Copy hook logic
             if not self.use_global_hook_path.get():
                 self._copy_hook_to_target(pid, self.log)
@@ -960,11 +1023,11 @@ class DLLInjectorGUI:
                     kernel32.CloseHandle(h_process)
             
             if success:
-                 self.log(f"✓✓✓ DLL INJECTED AND LOADED SUCCESSFULLY! ✓✓✓", "success")
-                 messagebox.showinfo("Success", f"DLL injected into {name}!")
+                self.log(f"✓✓✓ DLL INJECTED AND LOADED SUCCESSFULLY! ✓✓✓", "success")
+                messagebox.showinfo("Success", f"DLL injected into {name}!")
             else:
-                 self.log(f"Injection Failed or DLL load returned 0.", "error")
-                 messagebox.showerror("Error", "Injection failed. Check logs.")
+                self.log(f"Injection Failed or DLL load returned 0.", "error")
+                messagebox.showerror("Error", "Injection failed. Check logs.")
 
         except Exception as e:
             self.log(f"Exception during injection: {e}", "error")
@@ -1190,22 +1253,57 @@ class DLLInjectorGUI:
         Determines if a process is 64-bit.
         Returns True if 64-bit, False if 32-bit, None if unknown/failed.
         """
+        # Fast-fail if the PID is already gone
+        if not psutil.pid_exists(pid):
+            self.log(f"Arch check: PID {pid} no longer exists", "warning")
+            return None
+
+        # Bail out if the process is already terminating
+        try:
+            proc = psutil.Process(pid)
+            if not proc.is_running() or proc.status() in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+                self.log(f"Arch check: PID {pid} is not running (status={proc.status()})", "warning")
+                return None
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            self.log(f"Arch check: PID {pid} disappeared before architecture detection", "warning")
+            return None
+
+        header_arch = None
+
         # FIRST: Check the EXE header on disk (Most reliable if OS is lying)
         try:
-            exe_path = psutil.Process(pid).exe()
+            exe_path = proc.exe()
             if os.path.exists(exe_path):
-                with open(exe_path, "rb") as f:
-                    data = f.read(1024)
-                    if data.startswith(b'MZ'):
-                        # PE header offset is at 0x3C
-                        pe_offset = int.from_bytes(data[0x3C:0x40], "little")
-                        if len(data) > pe_offset + 6:
-                            # Signature 'PE\0\0' followed by Machine Type (2 bytes)
-                            machine = int.from_bytes(data[pe_offset+4:pe_offset+6], "little")
-                            if machine == 0x8664: # IMAGE_FILE_MACHINE_AMD64
-                                return True
-                            if machine == 0x014c: # IMAGE_FILE_MACHINE_I386
-                                return False
+                file_size = os.path.getsize(exe_path)
+                if file_size >= 0x3C + 6:  # enough room for PE offset + machine field
+                    with open(exe_path, "rb") as f:
+                        mz = f.read(2)
+                        if mz != b"MZ":
+                            raise ValueError("Missing MZ header")
+
+                        f.seek(0x3C)
+                        pe_offset_bytes = f.read(4)
+                        if len(pe_offset_bytes) < 4:
+                            raise ValueError("Truncated PE offset")
+                        pe_offset = int.from_bytes(pe_offset_bytes, "little")
+
+                        if pe_offset < 0 or pe_offset + 6 > file_size:
+                            raise ValueError("Invalid PE offset")
+
+                        f.seek(pe_offset)
+                        signature = f.read(4)
+                        if signature != b"PE\0\0":
+                            raise ValueError("Missing PE signature")
+
+                        machine_bytes = f.read(2)
+                        if len(machine_bytes) < 2:
+                            raise ValueError("Missing machine field")
+
+                        machine = int.from_bytes(machine_bytes, "little")
+                        if machine == 0x8664: # IMAGE_FILE_MACHINE_AMD64
+                            header_arch = True
+                        if machine == 0x014c: # IMAGE_FILE_MACHINE_I386
+                            header_arch = False
         except Exception as e:
             self.log(f"Arch check (PE): Failed reading {pid}'s EXE. {e}", "warning")
 
@@ -1215,31 +1313,88 @@ class DLLInjectorGUI:
             if not h_process:
                 # Fallback to standard Query
                 h_process = kernel32.OpenProcess(0x0400, False, pid) # PROCESS_QUERY_INFORMATION
-                
+
             if not h_process:
                 self.log(f"Arch check: Failed to OpenProcess {pid}. Error: {ctypes.get_last_error()}", "warning")
                 return None
-                
-            is_wow64 = ctypes.c_int(0)
+
+            is_wow64 = wintypes.BOOL(0)
             if not kernel32.IsWow64Process(h_process, ctypes.byref(is_wow64)):
                 self.log(f"Arch check: IsWow64Process failed for {pid}. Error: {ctypes.get_last_error()}", "warning")
                 kernel32.CloseHandle(h_process)
-                return None
-                
+                return header_arch
+
             kernel32.CloseHandle(h_process)
-            
+
             # If IsWow64Process is TRUE, it's a 32-bit process on 64-bit Windows.
             import platform
             is_os_64 = platform.machine().endswith("64")
-            
+
             if is_os_64:
-                 return not is_wow64.value
+                return not is_wow64.value
             else:
-                 return False # 32-bit OS -> 32-bit process
-                 
+                return False # 32-bit OS -> 32-bit process
+
         except Exception as e:
             self.log(f"Arch check failed for PID {pid}: {e}", "warning")
-            return None
+            return header_arch
+
+        return header_arch
+
+    def _detect_dll_architecture(self, dll_path):
+        """
+        Quickly inspects a PE header to determine if a DLL is 32-bit or 64-bit.
+        Returns "32", "64", or None if undetermined.
+        """
+        try:
+            with open(dll_path, "rb") as f:
+                mz = f.read(2)
+                if mz != b"MZ":
+                    self.log(f"DLL arch check: {dll_path} missing MZ header", "warning")
+                    return None
+
+                f.seek(0x3C)
+                pe_offset_bytes = f.read(4)
+                if len(pe_offset_bytes) < 4:
+                    return None
+                pe_offset = int.from_bytes(pe_offset_bytes, "little")
+
+                f.seek(pe_offset)
+                signature = f.read(4)
+                if signature != b"PE\0\0":
+                    self.log(f"DLL arch check: {dll_path} missing PE signature", "warning")
+                    return None
+
+                machine_bytes = f.read(2)
+                if len(machine_bytes) < 2:
+                    return None
+
+                machine = int.from_bytes(machine_bytes, "little")
+                if machine == 0x8664:
+                    return "64"
+                if machine == 0x014C:
+                    return "32"
+        except Exception as e:
+            self.log(f"DLL arch check failed for {dll_path}: {e}", "warning")
+        return None
+
+    def _verify_process_live(self, pid, name=None, stage=""):
+        """Confirm the process is still alive enough for injection work."""
+        try:
+            proc = psutil.Process(pid)
+            if not proc.is_running() or proc.status() in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+                self.log(
+                    f"Injection aborted during {stage}: PID {pid} ({name or proc.name()}) is terminating (status={proc.status()})",
+                    "warning",
+                )
+                return False
+            return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            self.log(
+                f"Injection aborted during {stage}: PID {pid} ({name or 'unknown'}) disappeared or is inaccessible",
+                "warning",
+            )
+            return False
 
     def open_hook_editor(self):
         if self.hook_editor_window and self.hook_editor_window.winfo_exists():
