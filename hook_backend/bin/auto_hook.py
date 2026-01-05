@@ -98,6 +98,10 @@ kernel32.WaitForSingleObject.restype = wintypes.DWORD
 kernel32.GetExitCodeThread.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
 kernel32.GetExitCodeThread.restype = wintypes.BOOL
 
+# Architecture helpers
+kernel32.IsWow64Process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+kernel32.IsWow64Process.restype = wintypes.BOOL
+
 user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, 
                                        wintypes.LPCWSTR, wintypes.UINT, wintypes.UINT, 
                                        wintypes.LPVOID]
@@ -980,7 +984,12 @@ class DLLInjectorGUI:
     def _inject_thread(self, pid, name, dll_path):
         try:
             self.log(f"Starting injection into {name} (PID: {pid})")
-            
+
+            if not psutil.pid_exists(pid):
+                self.log(f"Injection aborted: PID {pid} vanished before start", "warning")
+                messagebox.showerror("Process Exited", f"{name} is no longer running.")
+                return
+
             # Copy hook logic
             if not self.use_global_hook_path.get():
                 self._copy_hook_to_target(pid, self.log)
@@ -1238,9 +1247,21 @@ class DLLInjectorGUI:
             self.log(f"Arch check: PID {pid} no longer exists", "warning")
             return None
 
+        # Bail out if the process is already terminating
+        try:
+            proc = psutil.Process(pid)
+            if not proc.is_running() or proc.status() in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+                self.log(f"Arch check: PID {pid} is not running (status={proc.status()})", "warning")
+                return None
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            self.log(f"Arch check: PID {pid} disappeared before architecture detection", "warning")
+            return None
+
+        header_arch = None
+
         # FIRST: Check the EXE header on disk (Most reliable if OS is lying)
         try:
-            exe_path = psutil.Process(pid).exe()
+            exe_path = proc.exe()
             if os.path.exists(exe_path):
                 file_size = os.path.getsize(exe_path)
                 if file_size >= 0x3C + 6:  # enough room for PE offset + machine field
@@ -1269,9 +1290,9 @@ class DLLInjectorGUI:
 
                         machine = int.from_bytes(machine_bytes, "little")
                         if machine == 0x8664: # IMAGE_FILE_MACHINE_AMD64
-                            return True
+                            header_arch = True
                         if machine == 0x014c: # IMAGE_FILE_MACHINE_I386
-                            return False
+                            header_arch = False
         except Exception as e:
             self.log(f"Arch check (PE): Failed reading {pid}'s EXE. {e}", "warning")
 
@@ -1281,31 +1302,33 @@ class DLLInjectorGUI:
             if not h_process:
                 # Fallback to standard Query
                 h_process = kernel32.OpenProcess(0x0400, False, pid) # PROCESS_QUERY_INFORMATION
-                
+
             if not h_process:
                 self.log(f"Arch check: Failed to OpenProcess {pid}. Error: {ctypes.get_last_error()}", "warning")
                 return None
-                
-            is_wow64 = ctypes.c_int(0)
+
+            is_wow64 = wintypes.BOOL(0)
             if not kernel32.IsWow64Process(h_process, ctypes.byref(is_wow64)):
                 self.log(f"Arch check: IsWow64Process failed for {pid}. Error: {ctypes.get_last_error()}", "warning")
                 kernel32.CloseHandle(h_process)
-                return None
-                
+                return header_arch
+
             kernel32.CloseHandle(h_process)
-            
+
             # If IsWow64Process is TRUE, it's a 32-bit process on 64-bit Windows.
             import platform
             is_os_64 = platform.machine().endswith("64")
-            
+
             if is_os_64:
                 return not is_wow64.value
             else:
                 return False # 32-bit OS -> 32-bit process
-                 
+
         except Exception as e:
             self.log(f"Arch check failed for PID {pid}: {e}", "warning")
-            return None
+            return header_arch
+
+        return header_arch
 
     def _detect_dll_architecture(self, dll_path):
         """
