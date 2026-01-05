@@ -132,7 +132,374 @@ def is_target_code_object(code_obj):
     """UNCONDITIONAL EXTRACTION: Everything is a target."""
     return True
 
-def reconstruct_function_from_bytecode_advanced(func_or_codeobj, func_name=None):
+# =============================================================================
+# CORE HELPERS - MOVED TO TOP FOR SCOPE VISIBILITY
+# =============================================================================
+
+def generate_pyc_metadata(pyc_file, module_name, module_obj, main_code):
+    """Generates metadata file for reconstructed .pyc"""
+    try:
+        from types import CodeType
+        
+        metadata_file = pyc_file.with_suffix('.metadata.json')
+        
+        metadata = {
+            "module_name": module_name,
+            "pyc_file": str(pyc_file),
+            "generation_time": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "code_info": {
+                "co_name": main_code.co_name,
+                "co_filename": main_code.co_filename,
+                "co_firstlineno": main_code.co_firstlineno,
+                "co_argcount": main_code.co_argcount,
+                "co_nlocals": main_code.co_nlocals,
+                "co_stacksize": main_code.co_stacksize,
+                "co_flags": main_code.co_flags,
+                "co_code_length": len(main_code.co_code),
+                "constants_count": len(main_code.co_consts) if main_code.co_consts else 0,
+                "names_count": len(main_code.co_names) if main_code.co_names else 0,
+                "varnames_count": len(main_code.co_varnames) if main_code.co_varnames else 0,
+            },
+            # extract_module_attributes_metadata will be defined later, which is fine for runtime resolution
+            "module_attributes": extract_module_attributes_metadata(module_obj) if 'extract_module_attributes_metadata' in globals() else {}
+        }
+        
+
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
+            
+        return True
+        
+    except Exception as e:
+        print(f"[PYC-METADATA] Error generating metadata: {e}")
+        return False
+
+def extract_module_attributes_metadata(module_obj):
+    """Extracts metadata from module attributes"""
+    try:
+        attrs = {}
+        for attr in ['__doc__', '__file__', '__package__', '__loader__', '__spec__']:
+            if hasattr(module_obj, attr):
+                val = getattr(module_obj, attr)
+                attrs[attr] = str(val)
+        return attrs
+    except:
+        return {}
+
+def validate_generated_pyc(pyc_file):
+    """Validates if a generated PYC file is valid"""
+    try:
+        if not pyc_file.exists():
+            return False
+        if pyc_file.stat().st_size < 16:
+            return False
+        return True
+    except:
+        return False
+
+def attempt_automatic_decompilation(pyc_file, module_name):
+    """Attempts automatic decompilation using installed tools (uncompyle6/decompyle3)"""
+    # Verify we don't block main thread too long
+    pass
+
+
+
+def reconstruct_class_from_methods(class_name, methods_dict, metadata):
+    """Reconstructs a class from its extracted methods when source is unavailable"""
+    try:
+        lines = []
+        
+        # Class definition with bases from metadata
+        bases = metadata.get('bases', [])
+        if bases and bases != ['object']:
+            lines.append(f"class {class_name}({', '.join(bases)}):")
+        else:
+            lines.append(f"class {class_name}:")
+        
+        # Docstring
+        doc = metadata.get('doc', None)
+        if doc:
+            lines.append(f'    """{doc}"""')
+        else:
+            lines.append(f'    """Reconstructed class {class_name}"""')
+        
+        # Class attributes from metadata
+        attributes = metadata.get('attributes', [])
+        for attr in attributes:
+            if isinstance(attr, dict):
+                attr_name = attr.get('name', 'unknown')
+                attr_value = attr.get('value', None)
+                if attr_value is not None:
+                    lines.append(f"    {attr_name} = {attr_value}")
+        
+        # Methods
+        methods_added = False
+        for method_name, method_data in methods_dict.items():
+            if method_data.get('source_code'):
+                # Use source code directly
+                method_source = method_data['source_code']
+                # Indent properly
+                indented = '\n'.join([f"    {line}" for line in method_source.split('\n')])
+                lines.append(f"\n{indented}")
+                methods_added = True
+            elif method_data.get('reconstructed_code'):
+                # Use reconstructed code
+                reconstructed = method_data['reconstructed_code']
+                indented = '\n'.join([f"    {line}" for line in reconstructed.split('\n')])
+                lines.append(f"\n{indented}")
+                methods_added = True
+            else:
+                # Fallback stub
+                lines.append(f"\n    def {method_name}(self):")
+                lines.append(f"        # Method extraction failed")
+                lines.append(f"        pass")
+                methods_added = True
+        
+        if not methods_added:
+            lines.append("    pass")
+        
+        return '\n'.join(lines)
+        
+    except Exception as e:
+        return f"class {class_name}:\n    # Reconstruction failed: {e}\n    pass"
+
+
+def deduce_imports_from_extraction(extraction_results):
+    """Deduces necessary imports from extraction results"""
+    imports = set()
+    
+    try:
+        # Common imports that are often needed
+        common_imports = {
+            'requests': 'import requests',
+            'json': 'import json',
+            'os': 'import os',
+            'sys': 'import sys',
+            'time': 'import time',
+            'datetime': 'import datetime',
+            'base64': 'import base64',
+            'hashlib': 'import hashlib',
+            'hmac': 'import hmac',
+            'platform': 'import platform',
+            'subprocess': 'import subprocess',
+            'typing': 'from typing import Any, Dict, List, Optional',
+            're': 'import re',
+            'io': 'import io',
+            'pathlib': 'from pathlib import Path',
+        }
+        
+        # Check functions for patterns
+        for func_name, func_data in extraction_results.get('functions', {}).items():
+            bytecode = func_data.get('bytecode_analysis', {})
+            names = bytecode.get('names', [])
+            
+            for name in names:
+                if name in common_imports:
+                    imports.add(common_imports[name])
+            
+            # Check patterns
+            patterns = bytecode.get('patterns', [])
+            if 'HTTP_REQUEST_PATTERN' in patterns:
+                imports.add('import requests')
+            if 'FILE_IO_PATTERN' in patterns:
+                imports.add('import os')
+                imports.add('from pathlib import Path')
+            if 'CRYPTO_PATTERN' in patterns:
+                imports.add('import hashlib')
+                imports.add('import hmac')
+        
+        # Check classes
+        for class_name, class_data in extraction_results.get('classes', {}).items():
+            for method_name, method_data in class_data.get('methods', {}).items():
+                bytecode = method_data.get('bytecode_analysis', {})
+                names = bytecode.get('names', [])
+                
+                for name in names:
+                    if name in common_imports:
+                        imports.add(common_imports[name])
+        
+        # Check source code content for import statements
+        for func_name, func_data in extraction_results.get('functions', {}).items():
+            source = func_data.get('source_code', '') or func_data.get('reconstructed_code', '') or ''
+            for keyword, import_stmt in common_imports.items():
+                if f"{keyword}." in source or f"import {keyword}" in source:
+                    imports.add(import_stmt)
+        
+        return sorted(list(imports))
+        
+    except Exception as e:
+        print(f"[IMPORTS-DEDUCE] Error deducing imports: {e}")
+        return ['# Failed to deduce imports']
+
+
+def extract_from_bytecode_file(pyc_file):
+    """Extracts from .pyc bytecode file"""
+    try:
+        print(f"[BYTECODE-EXTRACT] 🔍 Processing: {pyc_file}")
+        
+        with open(pyc_file, 'rb') as f:
+            # Read header
+            magic = f.read(4)
+            timestamp = f.read(4)
+            
+            # Handle Python 3.7+ size field
+            if sys.version_info >= (3, 7):
+                size = f.read(4)
+            
+            # Try to load code object
+            try:
+                code_obj = marshal.load(f)
+                
+                if isinstance(code_obj, types.CodeType):
+                    # Save extracted code information
+                    safe_name = pyc_file.stem.replace('.', '_')
+                    output_dir = _backup_dir / "MAIN_CODE"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Reconstruct source from bytecode
+                    output_file = output_dir / f"bytecode_{safe_name}_RECONSTRUCTED.py"
+                    
+                    with open(output_file, 'w', encoding='utf-8', errors='ignore') as out_f:
+                        out_f.write(f"# RECONSTRUCTED FROM BYTECODE: {pyc_file}\n")
+                        out_f.write(f"# Extracted: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        out_f.write(f"# Original filename: {code_obj.co_filename}\n")
+                        out_f.write(f"# Code name: {code_obj.co_name}\n\n")
+                        
+                        # Disassembly
+                        out_f.write("# === BYTECODE DISASSEMBLY ===\n")
+                        disasm_output = StringIO()
+                        dis.dis(code_obj, file=disasm_output)
+                        for line in disasm_output.getvalue().split('\n'):
+                            out_f.write(f"# {line}\n")
+                        out_f.write("\n")
+                        
+                        # Constants
+                        out_f.write("# === CONSTANTS ===\n")
+                        for i, const in enumerate(code_obj.co_consts or []):
+                            if isinstance(const, types.CodeType):
+                                out_f.write(f"# CONST_{i} = <code object: {const.co_name}>\n")
+                            else:
+                                out_f.write(f"# CONST_{i} = {repr(const)}\n")
+                        out_f.write("\n")
+                        
+                        # Names
+                        out_f.write("# === NAMES ===\n")
+                        for i, name in enumerate(code_obj.co_names or []):
+                            out_f.write(f"# NAME_{i} = {repr(name)}\n")
+                        out_f.write("\n")
+                        
+                        # Variables
+                        out_f.write("# === VARIABLES ===\n")
+                        for i, var in enumerate(code_obj.co_varnames or []):
+                            out_f.write(f"# VAR_{i} = {repr(var)}\n")
+                        out_f.write("\n")
+                        
+                        # Reconstructed code
+                        out_f.write("# === RECONSTRUCTED CODE ===\n")
+                        logic = reconstruct_executable_logic(code_obj, code_obj.co_name)
+                        for line in logic:
+                            out_f.write(f"{line}\n")
+                        
+                        # Extract nested code objects (functions/classes)
+                        out_f.write("\n# === NESTED CODE OBJECTS ===\n")
+                        for i, const in enumerate(code_obj.co_consts or []):
+                            if isinstance(const, types.CodeType):
+                                out_f.write(f"\n# --- Nested code: {const.co_name} ---\n")
+                                nested_logic = reconstruct_executable_logic(const, const.co_name)
+                                reconstructed_def = f"def {const.co_name}({', '.join(const.co_varnames[:const.co_argcount])}):\n"
+                                out_f.write(reconstructed_def)
+                                for line in nested_logic:
+                                    out_f.write(f"    {line}\n")
+                    
+                    print(f"[BYTECODE-EXTRACT] ✅ Extracted: {output_file.name}")
+                    
+                    # Also save the raw .pyc copy
+                    pyc_copy = _backup_dir / "TARGET_PYC" / f"extracted_{safe_name}.pyc"
+                    pyc_copy.parent.mkdir(parents=True, exist_ok=True)
+                    import shutil
+                    shutil.copy2(pyc_file, pyc_copy)
+                    
+                    return True
+                    
+            except Exception as marshal_error:
+                print(f"[BYTECODE-EXTRACT] Marshal error: {marshal_error}")
+                
+                # Save raw analysis
+                output_file = _backup_dir / "TARGET_PYC" / f"{pyc_file.stem}_raw_analysis.txt"
+                output_file.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(output_file, 'w', encoding='utf-8', errors='ignore') as out_f:
+                    out_f.write(f"RAW BYTECODE ANALYSIS: {pyc_file}\n")
+                    out_f.write(f"Error: {marshal_error}\n\n")
+                    
+                    # Read raw bytes
+                    f.seek(0)
+                    raw_data = f.read()
+                    out_f.write(f"File size: {len(raw_data)} bytes\n")
+                    out_f.write(f"Magic: {magic.hex()}\n\n")
+                    
+                    # Hex dump
+                    out_f.write("HEX DUMP (first 500 bytes):\n")
+                    for i in range(0, min(500, len(raw_data)), 16):
+                        hex_part = ' '.join(f'{b:02x}' for b in raw_data[i:i+16])
+                        ascii_part = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in raw_data[i:i+16])
+                        out_f.write(f"{i:04x}: {hex_part:<48} {ascii_part}\n")
+                    
+        return False
+        
+    except Exception as e:
+        print(f"[BYTECODE-EXTRACT] Error: {e}")
+        return False
+
+
+def reconstruct_basic_logic(code_obj, func_name):
+    """Basic logic reconstruction fallback when advanced fails"""
+    try:
+        logic_lines = []
+        
+        constants = code_obj.co_consts or []
+        names = code_obj.co_names or []
+        varnames = code_obj.co_varnames or []
+        
+        # Add constants info
+        string_constants = [c for c in constants if isinstance(c, str) and c.strip()]
+        
+        if string_constants:
+            logic_lines.append(f"# Constants used: {string_constants[:5]}")
+        
+        if names:
+            logic_lines.append(f"# Functions/methods called: {list(names)[:10]}")
+        
+        if varnames:
+            logic_lines.append(f"# Local variables: {list(varnames)[:10]}")
+        
+        # Basic pattern matching
+        if any('http' in str(c).lower() for c in constants):
+            logic_lines.append("# Pattern: HTTP/API request detected")
+            urls = [c for c in string_constants if 'http' in c.lower()]
+            if urls:
+                logic_lines.append(f"url = {repr(urls[0])}")
+            logic_lines.append("# response = requests.get(url)")
+            logic_lines.append("# return response.json()")
+        elif 'open' in names:
+            logic_lines.append("# Pattern: File I/O detected")
+            logic_lines.append("# with open(filepath, mode) as f:")
+            logic_lines.append("#     content = f.read()")
+        elif any(n in names for n in ['hashlib', 'hmac', 'sha256', 'md5']):
+            logic_lines.append("# Pattern: Cryptographic operation detected")
+            logic_lines.append("# hash_result = hashlib.sha256(data).hexdigest()")
+        else:
+            logic_lines.append("# Complex logic - manual analysis required")
+        
+        logic_lines.append("pass  # Placeholder")
+        
+        return logic_lines
+        
+    except Exception as e:
+        return [f"# Basic reconstruction failed: {e}", "pass"]
+
+
     """
     Simplified reconstruction: try inspect.getsource, otherwise return a stub.
     Removed ultra-detailed bytecode reconstruction to simplify output.
@@ -175,6 +542,60 @@ def reconstruct_function_from_bytecode_advanced(func_or_codeobj, func_name=None)
 
     except Exception as e:
         return f"def {func_name or 'func'}(*args, **kwargs):\n    # reconstruction failed: {e}\n    pass"
+
+
+def force_reimport_main_as_library():
+    """Forces re-import of __main__ module as a library to expose source"""
+    try:
+        import sys
+        import importlib.util
+        from pathlib import Path
+        
+        print("[TARGET] 🔄 Forcing re-import of __main__ as library...")
+        
+        main_mod = sys.modules.get('__main__')
+        if not main_mod:
+             print("[TARGET] ⚠️  Cannot re-import __main__: module not found")
+             return
+
+        # Try to get file from various attributes
+        main_file = getattr(main_mod, '__file__', None)
+        
+        # If no file, try to guess from argv[0] if it ends in .py
+        if not main_file and sys.argv and sys.argv[0].endswith('.py'):
+            main_file = sys.argv[0]
+            
+        if not main_file:
+             print("[TARGET] ⚠️  Cannot re-import __main__: no file attribute found")
+             return
+
+        main_path = Path(main_file).resolve()
+        if not main_path.exists():
+             print(f"[TARGET] ⚠️  Cannot re-import __main__: file not found {main_path}")
+             return
+             
+        # Create a new name
+        SAFE_NAME = main_path.stem.replace('.', '_')
+        new_name = f"{SAFE_NAME}_reimported_lib"
+        
+        # Avoid duplicates if already done
+        if new_name in sys.modules:
+            return
+            
+        spec = importlib.util.spec_from_file_location(new_name, str(main_path))
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[new_name] = module
+            spec.loader.exec_module(module)
+            print(f"[TARGET] ✅ __main__ re-imported as {new_name}")
+            
+            # Since we iterate sys.modules later, this new module will be picked up automatically!
+        else:
+            print("[TARGET] ❌ Failed to create spec for __main__ re-import")
+
+    except Exception as e:
+        print(f"[TARGET] ❌ Error re-importing __main__: {e}")
+
 
 def setup_target_extraction_directory():
     """Setup directory for target code extraction"""
@@ -887,6 +1308,16 @@ def reconstruct_executable_logic(code_obj, func_name):
         # Get detailed bytecode instructions
         instructions = list(dis.get_instructions(code_obj))
         
+        # Code object data
+        constants = code_obj.co_consts or []
+        names = code_obj.co_names or []
+        varnames = code_obj.co_varnames or []
+
+        # Python stack simulator
+        stack = []
+        variables = {}
+        logic_lines = []
+        
         # Include DISASSEMBLY as comment for transparency/completeness
         try:
             import io
@@ -901,16 +1332,6 @@ def reconstruct_executable_logic(code_obj, func_name):
             logic_lines.append("# --- END DISASSEMBLY ---")
         except:
             pass
-
-        # Code object data
-        constants = code_obj.co_consts or []
-        names = code_obj.co_names or []
-        varnames = code_obj.co_varnames or []
-
-        # Python stack simulator
-        stack = []
-        variables = {}
-        logic_lines = []
 
         # print(f"[REVERSE] Analyzing {func_name}: {len(instructions)} instructions, {len(constants)} constants") # MINIMAL LOG
 
@@ -3110,9 +3531,6 @@ def scan_existing_targets_with_complete_extraction():
         print(f"[GENERIC] Existing targets scan error: {e}")
 
 
-    except Exception as e:
-        return []
-
 def scan_entire_directory_for_nuitka_modules():
     """Scans the ENTIRE directory for pre-compiled Nuitka modules"""
     try:
@@ -3539,6 +3957,8 @@ def generate_final_json_manifest(x):
     """Stub for final manifest generation"""
     print("[TARGET] Generating final manifest (stub)")
     pass
+
+
 
 
 # =============================================================================
