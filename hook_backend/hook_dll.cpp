@@ -505,7 +505,13 @@ DWORD WINAPI hookImpl(LPVOID lpParam) {
         "        print('ERROR: concurrent.futures still not available:', e)\n"
         "        print('Updated sys.path:', sys.path)\n"
         "except Exception as e:\n"
-        "    print('Failed to setup:', e)\n",
+        "    try:\n"
+        "        # Try to restore original stdout if redirection failed\n"
+        "        sys.stdout = sys.__stdout__\n"
+        "        sys.stderr = sys.__stderr__\n"
+        "        print('Failed to setup redirection:', e)\n"
+        "    except:\n"
+        "        pass\n",
         pyLogPath,
         pyHomePath); // Pass path string as argument 2 to snprintf
 
@@ -514,7 +520,8 @@ DWORD WINAPI hookImpl(LPVOID lpParam) {
     if (g_logFile) fprintf(g_logFile, "[HOOK] PyRun_SimpleString(setup) returned: %d\n", res);
     
     if (res != 0) {
-      dbgPrintf("[HOOK] Failed to run Python setup snippet\n");
+      dbgPrintf("[HOOK] Failed to run Python setup snippet. Checking for Python errors...\n");
+      if (PyErr_Print) PyErr_Print();
     }
   }
 

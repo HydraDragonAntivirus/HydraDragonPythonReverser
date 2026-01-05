@@ -373,7 +373,7 @@ def extract_target_components(module_name, module_obj):
                         if inspect.isclass(attr):
 
                             # Simplified reconstruction
-                            reconstructed_class = reconstruct_function_from_bytecode_advanced(attr, attr_name) # Stub for class
+                            reconstructed_class = complete_class_reverse_engineering(attr, attr_name)
                             f.write(f"\n{reconstructed_class}\n")
                     except:
                         pass
@@ -864,6 +864,17 @@ def ultra_aggressive_function_reconstruction(func_obj, func_name):
 
 def reconstruct_executable_logic(code_obj, func_name):
     """Reconstructs EXECUTABLE logic from bytecode - COMPLETE REVERSE ENGINEERING"""
+    if code_obj is None:
+        return ["# Error: code_obj is None"]
+    
+    # If it's a function, get its code object
+    if hasattr(code_obj, "__code__"):
+        code_obj = code_obj.__code__
+        
+    # If it's still not a code object (e.g. it's a class/type), we can't use this logic
+    if not hasattr(code_obj, "co_code"):
+        return [f"# Error: Cannot disassemble {type(code_obj)} object as bytecode"]
+
     try:
         # Get detailed bytecode instructions
         instructions = list(dis.get_instructions(code_obj))
