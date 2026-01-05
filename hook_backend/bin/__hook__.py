@@ -7,7 +7,6 @@
 import os
 import sys
 import time
-import ctypes
 import marshal
 import types
 import threading
@@ -3592,13 +3591,6 @@ try:
         
         print(f"[TARGET] HOOK.PY EXECUTING: --- COMPREHENSIVE EXTRACTION COMPLETE ---")
         
-        try:
-            import ctypes
-            MessageBox = ctypes.windll.user32.MessageBoxW
-            MessageBox(None, 'Python __hook__.py COMPLETED successfully!\nAll analysis and extraction steps finished.\nCheck console and output directory.', 'Hook Script Success (COMPLETE)', 0x40) # 0x40 = MB_ICONINFORMATION
-        except Exception as e:
-            print(f"[TARGET] HOOK.PY ERROR: Could not show success MessageBox: {e}")
-
     else:
         print("[TARGET] HOOK.PY FAILED: Could not set up extraction directory.")
         raise Exception("Failed to set up extraction directory.")
@@ -3606,10 +3598,3 @@ try:
 except Exception as e:
     print(f"[TARGET] HOOK.PY FAILED during execution: {e}")
     traceback.print_exc()
-    try:
-        # Try to show an error message popup
-        import ctypes
-        MessageBox = ctypes.windll.user32.MessageBoxW
-        MessageBox(None, f'Python __hook__.py FAILED TO RUN.\n\nError: {e}', 'Hook Script FAILED', 0x10) # 0x10 = MB_ICONERROR
-    except Exception as e2:
-        print(f"[TARGET] HOOK.PY ERROR: Could not show failure MessageBox: {e2}")
