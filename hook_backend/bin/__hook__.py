@@ -609,23 +609,32 @@ def complete_class_reverse_engineering(class_obj, class_name):
             if not attr_name.startswith('__'):
                 try:
                     attr = getattr(class_obj, attr_name)
+                    
+                    # 1. Nested Classes
+                    if inspect.isclass(attr):
+                        methods_found = True
+                        nested_class = complete_class_reverse_engineering(attr, attr_name)
+                        indented = '\n'.join([f"    {line}" for line in nested_class.split('\n')])
+                        lines.append(f"\n{indented}")
+                        continue
+
+                    # 2. Methods/Callables
                     if callable(attr):
                         methods_found = True
 
-                        # Try normal source extraction
+                        # Try normal source extraction first
                         try:
                             if hasattr(attr, '__func__'):
                                 method_source = inspect.getsource(attr.__func__)
                             else:
                                 method_source = inspect.getsource(attr)
-                            # Indent the source
                             indented = '\n'.join([f"    {line}" for line in method_source.split('\n')])
                             lines.append(f"\n{indented}")
                             continue
                         except:
                             pass
 
-                        # COMPLETE reverse engineering of the method
+                        # Bytecode reverse engineering
                         method_reconstruction = complete_method_reverse_engineering(attr, attr_name, class_name)
                         lines.append(f"\n    {method_reconstruction}")
                 except:
@@ -878,6 +887,21 @@ def reconstruct_executable_logic(code_obj, func_name):
     try:
         # Get detailed bytecode instructions
         instructions = list(dis.get_instructions(code_obj))
+        
+        # Include DISASSEMBLY as comment for transparency/completeness
+        try:
+            import io
+            from contextlib import redirect_stdout
+            f_dis = io.StringIO()
+            with redirect_stdout(f_dis):
+                dis.dis(code_obj)
+            logic_lines.append("# --- BYTECODE DISASSEMBLY ---")
+            for dline in f_dis.getvalue().split('\n'):
+                if dline.strip():
+                    logic_lines.append(f"# {dline}")
+            logic_lines.append("# --- END DISASSEMBLY ---")
+        except:
+            pass
 
         # Code object data
         constants = code_obj.co_consts or []
@@ -969,24 +993,34 @@ def reconstruct_executable_logic(code_obj, func_name):
                 stack.append(('CONST', f_string))
 
             # Function Calls
-            elif opname in ['CALL_FUNCTION', 'CALL_METHOD', 'CALL_FUNCTION_KW', 'CALL_FUNCTION_EX']:
-                argc = arg if opname == 'CALL_FUNCTION' else 0
-
+            elif opname in ['CALL_FUNCTION', 'CALL_METHOD', 'CALL_FUNCTION_KW', 'CALL_FUNCTION_EX', 'CALL_METHOD_KW']:
+                # On Python 3.9+, CALL_METHOD uses arg as argc
+                argc = arg
+                
+                # Extract keyword names if present
+                if opname in ['CALL_FUNCTION_KW', 'CALL_METHOD_KW'] and stack:
+                    kwargs_names = stack.pop()
+                
                 # Extract arguments
-                args = []
+                args_list = []
                 for _ in range(argc):
                     if stack:
-                        args.append(format_stack_item(stack.pop()))
-                args.reverse()
+                        args_list.append(format_stack_item(stack.pop()))
+                args_list.reverse()
 
-                # Extract function
+                # Extract function or method
                 if stack:
                     func = stack.pop()
-                    func_call = f"{format_stack_item(func)}({', '.join(args)})"
-
-                    # If it's an important call, assign it
-                    if should_assign_call(format_stack_item(func)):
-                        logic_lines.append(f"result = {func_call}")
+                    func_name_str = format_stack_item(func)
+                    
+                    # For CALL_METHOD, the stack has [self, method_name, args...]
+                    # But our stack pop above already took the function
+                    
+                    func_call = f"{func_name_str}({', '.join(args_list)})"
+                    
+                    # Heuristic: if it's a known important function or has many args, log it
+                    if argc > 0 or any(x in func_name_str for x in ['set', 'get', 'post', 'auth', 'save']):
+                        logic_lines.append(f"result = {func_call} # Captured call")
                         stack.append(('VAR', 'result'))
                     else:
                         stack.append(('CALL', func_call))
