@@ -934,7 +934,18 @@ class DLLInjectorGUI:
 
         # Abort if we know the architecture mismatch could crash the target
         dll_arch = self._detect_dll_architecture(dll_path)
-        if is_target_64 is not None and dll_arch is not None:
+        if is_target_64 is not None:
+            if dll_arch is None:
+                self.log(
+                    "Unable to determine DLL architecture; refusing injection to avoid crashing the target.",
+                    "error",
+                )
+                messagebox.showerror(
+                    "Unknown Architecture",
+                    "Could not determine the selected DLL's architecture. Please choose a known 32-bit or 64-bit DLL.",
+                )
+                return
+
             expected_arch = "64" if is_target_64 else "32"
             if dll_arch != expected_arch:
                 self.log(
@@ -977,11 +988,11 @@ class DLLInjectorGUI:
                     kernel32.CloseHandle(h_process)
             
             if success:
-                 self.log(f"✓✓✓ DLL INJECTED AND LOADED SUCCESSFULLY! ✓✓✓", "success")
-                 messagebox.showinfo("Success", f"DLL injected into {name}!")
+                self.log(f"✓✓✓ DLL INJECTED AND LOADED SUCCESSFULLY! ✓✓✓", "success")
+                messagebox.showinfo("Success", f"DLL injected into {name}!")
             else:
-                 self.log(f"Injection Failed or DLL load returned 0.", "error")
-                 messagebox.showerror("Error", "Injection failed. Check logs.")
+                self.log(f"Injection Failed or DLL load returned 0.", "error")
+                messagebox.showerror("Error", "Injection failed. Check logs.")
 
         except Exception as e:
             self.log(f"Exception during injection: {e}", "error")
@@ -1211,18 +1222,36 @@ class DLLInjectorGUI:
         try:
             exe_path = psutil.Process(pid).exe()
             if os.path.exists(exe_path):
-                with open(exe_path, "rb") as f:
-                    data = f.read(1024)
-                    if data.startswith(b'MZ'):
-                        # PE header offset is at 0x3C
-                        pe_offset = int.from_bytes(data[0x3C:0x40], "little")
-                        if len(data) > pe_offset + 6:
-                            # Signature 'PE\0\0' followed by Machine Type (2 bytes)
-                            machine = int.from_bytes(data[pe_offset+4:pe_offset+6], "little")
-                            if machine == 0x8664: # IMAGE_FILE_MACHINE_AMD64
-                                return True
-                            if machine == 0x014c: # IMAGE_FILE_MACHINE_I386
-                                return False
+                file_size = os.path.getsize(exe_path)
+                if file_size >= 0x3C + 6:  # enough room for PE offset + machine field
+                    with open(exe_path, "rb") as f:
+                        mz = f.read(2)
+                        if mz != b"MZ":
+                            raise ValueError("Missing MZ header")
+
+                        f.seek(0x3C)
+                        pe_offset_bytes = f.read(4)
+                        if len(pe_offset_bytes) < 4:
+                            raise ValueError("Truncated PE offset")
+                        pe_offset = int.from_bytes(pe_offset_bytes, "little")
+
+                        if pe_offset < 0 or pe_offset + 6 > file_size:
+                            raise ValueError("Invalid PE offset")
+
+                        f.seek(pe_offset)
+                        signature = f.read(4)
+                        if signature != b"PE\0\0":
+                            raise ValueError("Missing PE signature")
+
+                        machine_bytes = f.read(2)
+                        if len(machine_bytes) < 2:
+                            raise ValueError("Missing machine field")
+
+                        machine = int.from_bytes(machine_bytes, "little")
+                        if machine == 0x8664: # IMAGE_FILE_MACHINE_AMD64
+                            return True
+                        if machine == 0x014c: # IMAGE_FILE_MACHINE_I386
+                            return False
         except Exception as e:
             self.log(f"Arch check (PE): Failed reading {pid}'s EXE. {e}", "warning")
 
@@ -1250,9 +1279,9 @@ class DLLInjectorGUI:
             is_os_64 = platform.machine().endswith("64")
             
             if is_os_64:
-                 return not is_wow64.value
+                return not is_wow64.value
             else:
-                 return False # 32-bit OS -> 32-bit process
+                return False # 32-bit OS -> 32-bit process
                  
         except Exception as e:
             self.log(f"Arch check failed for PID {pid}: {e}", "warning")
@@ -1276,7 +1305,12 @@ class DLLInjectorGUI:
                     return None
                 pe_offset = int.from_bytes(pe_offset_bytes, "little")
 
-                f.seek(pe_offset + 4)  # skip PE\0\0 signature
+                f.seek(pe_offset)
+                signature = f.read(4)
+                if signature != b"PE\0\0":
+                    self.log(f"DLL arch check: {dll_path} missing PE signature", "warning")
+                    return None
+
                 machine_bytes = f.read(2)
                 if len(machine_bytes) < 2:
                     return None
