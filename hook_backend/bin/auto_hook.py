@@ -679,6 +679,9 @@ class DLLInjectorGUI:
         """Synchronous version of injection logic for Ninja mode."""
         try:
             is_target_64 = self._is_64bit_process(pid)
+            if is_target_64 is None:
+                self.log("Injection aborted: Unable to determine target architecture (process may have exited)", "warning")
+                return False, None
             # COPY OR SET GLOBAL
             if copy_hook:
                 if self.use_global_hook_path.get():
@@ -1218,6 +1221,11 @@ class DLLInjectorGUI:
         Determines if a process is 64-bit.
         Returns True if 64-bit, False if 32-bit, None if unknown/failed.
         """
+        # Fast-fail if the PID is already gone
+        if not psutil.pid_exists(pid):
+            self.log(f"Arch check: PID {pid} no longer exists", "warning")
+            return None
+
         # FIRST: Check the EXE header on disk (Most reliable if OS is lying)
         try:
             exe_path = psutil.Process(pid).exe()
