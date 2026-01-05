@@ -623,6 +623,12 @@ class DLLInjectorGUI:
             
             # Auto-detect Architecture
             is_target_64 = self._is_64bit_process(pid)
+            if is_target_64 is None:
+                self.log(
+                    "🥷 Ninja Injection skipped: Unable to determine target architecture (process may have exited)",
+                    "warning",
+                )
+                return
             dll_name = "hook64.dll" if is_target_64 else "hook32.dll"
                 
             script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -912,22 +918,28 @@ class DLLInjectorGUI:
         try:
             is_target_64 = self._is_64bit_process(pid)
 
+            if is_target_64 is None:
+                self.log(
+                    "Injection aborted: Unable to determine target architecture (process may have exited)",
+                    "warning",
+                )
+                return
+
             # Only switch if we successfully determined the architecture
-            if is_target_64 is not None:
-                target_arch_str = "64-bit" if is_target_64 else "32-bit"
-                
-                dir_name = os.path.dirname(dll_path)
-                base_name = os.path.basename(dll_path).lower()
-                
-                new_dll = None
-                if is_target_64 and "hook32.dll" in base_name:
-                    new_dll = os.path.join(dir_name, "hook64.dll")
-                elif not is_target_64 and "hook64.dll" in base_name:
-                    new_dll = os.path.join(dir_name, "hook32.dll")
-                    
-                if new_dll and os.path.exists(new_dll):
-                    self.log(f"Auto-switching DLL to {os.path.basename(new_dll)} for {target_arch_str} target.", "warning")
-                    dll_path = new_dll
+            target_arch_str = "64-bit" if is_target_64 else "32-bit"
+
+            dir_name = os.path.dirname(dll_path)
+            base_name = os.path.basename(dll_path).lower()
+
+            new_dll = None
+            if is_target_64 and "hook32.dll" in base_name:
+                new_dll = os.path.join(dir_name, "hook64.dll")
+            elif not is_target_64 and "hook64.dll" in base_name:
+                new_dll = os.path.join(dir_name, "hook32.dll")
+
+            if new_dll and os.path.exists(new_dll):
+                self.log(f"Auto-switching DLL to {os.path.basename(new_dll)} for {target_arch_str} target.", "warning")
+                dll_path = new_dll
         except Exception as e:
             self.log(f"Error checking architecture: {e}", "error")
 
