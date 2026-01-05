@@ -905,9 +905,10 @@ class DLLInjectorGUI:
         dll_path = self.dll_path_var.get()
 
         # FIX: Auto-switch DLL based on target architecture
+        is_target_64 = None
         try:
             is_target_64 = self._is_64bit_process(pid)
-            
+
             # Only switch if we successfully determined the architecture
             if is_target_64 is not None:
                 target_arch_str = "64-bit" if is_target_64 else "32-bit"
@@ -926,10 +927,26 @@ class DLLInjectorGUI:
                     dll_path = new_dll
         except Exception as e:
             self.log(f"Error checking architecture: {e}", "error")
-        
+
         if not os.path.exists(dll_path):
             messagebox.showerror("DLL Not Found", f"DLL file not found:\n{dll_path}")
             return
+
+        # Abort if we know the architecture mismatch could crash the target
+        dll_arch = self._detect_dll_architecture(dll_path)
+        if is_target_64 is not None and dll_arch is not None:
+            expected_arch = "64" if is_target_64 else "32"
+            if dll_arch != expected_arch:
+                self.log(
+                    f"Architecture mismatch: target is {'64' if is_target_64 else '32'}-bit but DLL appears to be {dll_arch}-bit.",
+                    "error"
+                )
+                messagebox.showerror(
+                    "Architecture Mismatch",
+                    f"Selected DLL architecture ({dll_arch}-bit) does not match target process ({'64' if is_target_64 else '32'}-bit).\n"
+                    "Choose the correct DLL to avoid crashes."
+                )
+                return
         
         self.inject_btn.config(state=tk.DISABLED, text="Injecting...")
         threading.Thread(target=self._inject_thread, args=(pid, name, dll_path), daemon=True).start()
@@ -1240,6 +1257,38 @@ class DLLInjectorGUI:
         except Exception as e:
             self.log(f"Arch check failed for PID {pid}: {e}", "warning")
             return None
+
+    def _detect_dll_architecture(self, dll_path):
+        """
+        Quickly inspects a PE header to determine if a DLL is 32-bit or 64-bit.
+        Returns "32", "64", or None if undetermined.
+        """
+        try:
+            with open(dll_path, "rb") as f:
+                mz = f.read(2)
+                if mz != b"MZ":
+                    self.log(f"DLL arch check: {dll_path} missing MZ header", "warning")
+                    return None
+
+                f.seek(0x3C)
+                pe_offset_bytes = f.read(4)
+                if len(pe_offset_bytes) < 4:
+                    return None
+                pe_offset = int.from_bytes(pe_offset_bytes, "little")
+
+                f.seek(pe_offset + 4)  # skip PE\0\0 signature
+                machine_bytes = f.read(2)
+                if len(machine_bytes) < 2:
+                    return None
+
+                machine = int.from_bytes(machine_bytes, "little")
+                if machine == 0x8664:
+                    return "64"
+                if machine == 0x014C:
+                    return "32"
+        except Exception as e:
+            self.log(f"DLL arch check failed for {dll_path}: {e}", "warning")
+        return None
 
     def open_hook_editor(self):
         if self.hook_editor_window and self.hook_editor_window.winfo_exists():
