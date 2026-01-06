@@ -8,6 +8,10 @@ import os
 import sys
 import time
 import marshal
+
+# Increase recursion depth for deep bytecode analysis
+sys.setrecursionlimit(10000)
+
 import types
 import threading
 import struct
@@ -2556,29 +2560,30 @@ def extract_module_attributes_metadata(module_obj):
         return {}
 
 def attempt_automatic_decompilation(pyc_file, module_name):
-    """Attempts automatic decompilation of .pyc"""
+    """Attempts automatic decompilation of .pyc using pycdc only"""
     try:
-        # List of decompilers to try in order
+        (_backup_dir / "DECOMPILED").mkdir(parents=True, exist_ok=True)
+
+        # User requested to avoid uncompyle6/decompyle3 due to bad marshal data errors
         decompilers = [
             ('pycdc', try_pycdc)
         ]
-
-        for decompiler_name, decompiler_func in decompilers:
+        
+        success = False
+        for name, func in decompilers:
             try:
-                result = decompiler_func(pyc_file, module_name)
-                if result:
-                    # print(f"[AUTO-DECOMPILE] ✅ Success with {decompiler_name}: {module_name}") # MINIMAL LOG
-                    return True
-            except Exception as e:
-                print(f"[AUTO-DECOMPILE] {decompiler_name} failed for {module_name}: {e}")
+                if func(pyc_file, module_name):
+                    success = True
+            except:
                 continue
-
-        # print(f"[AUTO-DECOMPILE] ❌ All decompilers failed for {module_name}") # MINIMAL LOG
-        return False
+        
+        return success
 
     except Exception as e:
         print(f"[AUTO-DECOMPILE] Error: {e}")
         return False
+
+
 
 def try_pycdc(pyc_file, module_name):
     """Attempts decompilation with pycdc"""
@@ -3868,9 +3873,10 @@ def preserve_module_structure():
                 if not is_target_module(module_name, module_obj):
                     continue
                     
-                # Skip __main__ as it is handled separately usually
-                if module_name == '__main__':
-                    continue
+                # We want to capture EVERYTHING, including __main__
+                # if module_name == '__main__':
+                #     continue
+
                 
                 # Determine relative path
                 parts = module_name.split('.')
@@ -3979,6 +3985,10 @@ try:
         binary_analysis = None
         assembly_correlations = None
         native_code_analysis = None
+
+        # 0. Force re-import of main
+        print(f"[TARGET] HOOK.PY (0/9): Forcing re-import of __main__...")
+        force_reimport_main_as_library()
 
         # 1. Scan existing modules (Python code)
         print(f"[TARGET] HOOK.PY (1/9): Scanning existing modules (sys.modules)...")
