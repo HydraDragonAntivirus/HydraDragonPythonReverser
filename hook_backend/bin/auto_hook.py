@@ -3,7 +3,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox, Toplevel
 from ctypes import wintypes
 
-# --- Core WinAPI (Simplified) ---
+# --- Simplified Windows API ---
 k32 = ctypes.WinDLL('kernel32', use_last_error=True)
 ntdll = ctypes.WinDLL('ntdll', use_last_error=True)
 
@@ -20,8 +20,8 @@ _def(k32.IsWow64Process, wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(wintypes
 class LiteInjector:
     def __init__(self, root):
         self.root = root
-        self.root.title("Python Hook Injector")
-        self.root.geometry("700x600")
+        self.root.title("Python Lite Injector")
+        self.root.geometry("750x600")
         
         self.ninja_on, self.processed = False, set()
         self.hook_var = tk.StringVar(value=self._path("__hook__.py"))
@@ -36,42 +36,39 @@ class LiteInjector:
         return p if os.path.exists(p) else name
 
     def _build_ui(self):
-        # 1. Top Bar: Search & Filter
+        # 1. Filters
         top = tk.Frame(self.root, pady=5)
         top.pack(fill=tk.X, padx=10)
         tk.Button(top, text="Refresh", command=self.refresh).pack(side=tk.LEFT)
         self.search = tk.Entry(top)
         self.search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         self.search.bind("<KeyRelease>", lambda e: self.update_view())
-        tk.Checkbutton(top, text="Ignore Std Installs", variable=self.hide_std, command=self.update_view).pack(side=tk.RIGHT)
+        tk.Checkbutton(top, text="Hide Default Installs", variable=self.hide_std, command=self.update_view).pack(side=tk.RIGHT)
 
-        # 2. Process Tree
+        # 2. Tree
         cols = ("PID", "Name", "Arch", "Path")
         self.tree = ttk.Treeview(self.root, columns=cols, show="headings", height=12)
-        for c, w in zip(cols, (60, 150, 60, 400)): 
+        for c, w in zip(cols, (60, 150, 60, 450)): 
             self.tree.heading(c, text=c); self.tree.column(c, width=w)
         self.tree.pack(fill=tk.BOTH, expand=True, padx=10)
         self.tree.bind("<Double-1>", lambda e: self.run_inject())
 
-        # 3. Settings
-        cfg = tk.LabelFrame(self.root, text="Configuration", padx=10, pady=5)
+        # 3. Settings (Wide Path Support)
+        cfg = tk.LabelFrame(self.root, text="Settings", padx=10, pady=5)
         cfg.pack(fill=tk.X, padx=10, pady=10)
         
-        # Hook Path - Now Wide and Visible
         h_row = tk.Frame(cfg)
         h_row.pack(fill=tk.X, pady=2)
-        tk.Label(h_row, text="Hook:").pack(side=tk.LEFT)
-        tk.Entry(h_row, textvariable=self.hook_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        tk.Label(h_row, text="Hook File:").pack(side=tk.LEFT)
+        tk.Entry(h_row, textvariable=self.hook_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5) # Expanded
         tk.Button(h_row, text="Edit", command=self.edit_hook).pack(side=tk.RIGHT)
         tk.Button(h_row, text="...", command=lambda: self.hook_var.set(filedialog.askopenfilename() or self.hook_var.get())).pack(side=tk.RIGHT, padx=2)
 
-        # DLL Path
         d_row = tk.Frame(cfg)
         d_row.pack(fill=tk.X, pady=2)
-        tk.Label(d_row, text="DLL:  ").pack(side=tk.LEFT)
+        tk.Label(d_row, text="Base DLL: ").pack(side=tk.LEFT)
         tk.Entry(d_row, textvariable=self.dll_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        # Action Buttons
         btns = tk.Frame(self.root, pady=5)
         btns.pack(fill=tk.X, padx=10)
         self.btn_ninja = tk.Button(btns, text="Ninja Mode: OFF", command=self.toggle_ninja, width=15)
@@ -85,35 +82,21 @@ class LiteInjector:
         self.log_box.config(state='normal'); self.log_box.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {m}\n"); self.log_box.see(tk.END); self.log_box.config(state='disabled')
 
     def is_target(self, p):
-        """ Checks ONLY for python3*.dll and ignores standard installation paths. """
+        """ Target Check: contains 'python3*.dll' and NOT in standard system paths. """
         try:
             exe = (p.info['exe'] or "").lower()
             if self.hide_std.get():
-                if any(x in exe for x in ["program files", "windows", "appdata\\local\\programs\\python"]):
-                    return False
+                # Ignore standard installation paths
+                if any(x in exe for x in ["program files", "windows", "appdata\\local\\programs\\python"]): return False
             
-            # THE CORE CHECK: Scan loaded modules for python3*.dll
+            # Identify by loaded modules
             for m in p.memory_maps():
-                if "python3" in os.path.basename(m.path).lower():
-                    return True
+                if "python3" in os.path.basename(m.path).lower(): return True
         except: pass
         return False
 
-    def refresh(self):
-        self.procs = [p for p in psutil.process_iter(['pid', 'name', 'exe'])]
-        self.update_view()
-
-    def update_view(self):
-        self.tree.delete(*self.tree.get_children())
-        query = self.search.get().lower()
-        for p in self.procs:
-            if self.is_target(p):
-                pid, name, exe = p.info['pid'], p.info['name'], p.info['exe'] or ""
-                if query in name.lower() or query in str(pid):
-                    arch = self.get_arch(pid)
-                    self.tree.insert("", tk.END, values=(pid, name, "x64" if arch else "x86", exe))
-
     def get_arch(self, pid):
+        """ Returns True for x64, False for x86 (32-bit). """
         try:
             h = k32.OpenProcess(0x1000, False, pid)
             if h:
@@ -124,6 +107,20 @@ class LiteInjector:
         except: pass
         return True
 
+    def refresh(self):
+        self.procs = [p for p in psutil.process_iter(['pid', 'name', 'exe'])]
+        self.update_view()
+
+    def update_view(self):
+        self.tree.delete(*self.tree.get_children())
+        q = self.search.get().lower()
+        for p in self.procs:
+            if self.is_target(p):
+                pid, name, exe = p.info['pid'], p.info['name'], p.info['exe'] or ""
+                if q in name.lower() or q in str(pid):
+                    arch = "x64" if self.get_arch(pid) else "x86"
+                    self.tree.insert("", tk.END, values=(pid, name, arch, exe))
+
     def run_inject(self):
         sel = self.tree.selection()
         if sel:
@@ -132,45 +129,45 @@ class LiteInjector:
 
     def inject(self, pid, name):
         try:
-            self.log(f"Targeting: {name} ({pid})")
-            is64, dll = self.get_arch(pid), self.dll_var.get()
+            is64 = self.get_arch(pid)
+            dll_dir = os.path.dirname(os.path.abspath(self.dll_var.get()))
             
-            # Auto-Bitness
-            if is64 and "32" in dll: dll = dll.replace("32", "64")
-            elif not is64 and "64" in dll: dll = dll.replace("64", "32")
+            # --- Architecture Logic: Forced File Names ---
+            target_dll = os.path.join(dll_dir, "hook64.dll" if is64 else "hook32.dll")
             
-            if not os.path.exists(dll): return self.log("Error: DLL not found")
+            if not os.path.exists(target_dll): 
+                return self.log(f"Error: {os.path.basename(target_dll)} missing in {dll_dir}")
 
-            # Setup Hook Config
-            cfg_path = os.path.join(os.getenv('TEMP'), "hook_config.ini")
-            with open(cfg_path, "w") as f:
+            self.log(f"Injecting {os.path.basename(target_dll)} into {name} ({pid})...")
+            
+            # Setup Temp Config
+            with open(os.path.join(os.getenv('TEMP'), "hook_config.ini"), "w") as f:
                 f.write(f"[General]\nHookPath={os.path.dirname(os.path.abspath(self.hook_var.get()))}\n")
 
-            # Native LoadLibrary Injection
             h_proc = k32.OpenProcess(0x1F0FFF, False, pid)
-            if not h_proc: return self.log("Failed to open process")
+            if not h_proc: return self.log(f"Access Denied: {name}")
 
-            path = os.path.abspath(dll).encode('utf-16le') + b'\0'
-            mem = k32.VirtualAllocEx(h_proc, 0, len(path), 0x1000, 0x04)
-            k32.WriteProcessMemory(h_proc, mem, path, len(path), 0)
+            path_bytes = os.path.abspath(target_dll).encode('utf-16le') + b'\0'
+            mem = k32.VirtualAllocEx(h_proc, 0, len(path_bytes), 0x1000, 0x04)
+            k32.WriteProcessMemory(h_proc, mem, path_bytes, len(path_bytes), 0)
             
             load_lib = k32.GetProcAddress(k32.GetModuleHandleW("kernel32.dll"), b"LoadLibraryW")
             h_thread = k32.CreateRemoteThread(h_proc, None, 0, load_lib, mem, 0, None)
             
-            if not h_thread: # Fallback for modern Windows
+            if not h_thread: # Fallback for Windows restrictions
                 h_t = wintypes.HANDLE()
                 ntdll.NtCreateThreadEx(ctypes.byref(h_t), 0x1FFFFF, None, h_proc, load_lib, mem, 0, 0, 0, 0, None)
                 h_thread = h_t.value
 
             if h_thread:
-                self.log(f"Successfully Injected into {name}!")
+                self.log(f"Success! Injected into {name}.")
                 k32.CloseHandle(h_thread)
             k32.CloseHandle(h_proc)
         except Exception as e: self.log(f"Err: {e}")
 
     def toggle_ninja(self):
         self.ninja_on = not self.ninja_on
-        self.btn_ninja.config(text="Ninja: ON" if self.ninja_on else "Ninja: OFF", bg="green" if self.ninja_on else "SystemButtonFace")
+        self.btn_ninja.config(text="Ninja: ON" if self.ninja_on else "Ninja: OFF", bg="#4caf50" if self.ninja_on else "SystemButtonFace")
         if self.ninja_on: threading.Thread(target=self.ninja_loop, daemon=True).start()
 
     def ninja_loop(self):
@@ -182,13 +179,12 @@ class LiteInjector:
             time.sleep(2)
 
     def edit_hook(self):
-        top = Toplevel(self.root); top.title("Editor"); top.geometry("500x400")
-        txt = scrolledtext.ScrolledText(top, font=("Consolas", 10))
-        txt.pack(fill=tk.BOTH, expand=True)
+        top = Toplevel(self.root); top.geometry("600x400"); top.title("Hook Editor")
+        txt = scrolledtext.ScrolledText(top, font=("Consolas", 10)); txt.pack(fill=tk.BOTH, expand=True)
         try:
             with open(self.hook_var.get(), 'r') as f: txt.insert('1.0', f.read())
         except: pass
-        tk.Button(top, text="Save", bg="green", fg="white", command=lambda: [open(self.hook_var.get(), 'w').write(txt.get('1.0', tk.END)), messagebox.showinfo("Saved", "Hook updated")]).pack(fill=tk.X)
+        tk.Button(top, text="Save Changes", bg="green", fg="white", command=lambda: [open(self.hook_var.get(), 'w').write(txt.get('1.0', tk.END)), messagebox.showinfo("Saved", "Hook file updated")]).pack(fill=tk.X)
 
 if __name__ == "__main__":
     if not ctypes.windll.shell32.IsUserAnAdmin():
