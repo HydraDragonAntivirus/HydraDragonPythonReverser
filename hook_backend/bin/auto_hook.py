@@ -1,9 +1,9 @@
-import ctypes, os, sys, time, threading, psutil
+import ctypes, os, sys, time, threading, psutil, shutil, platform
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox, Toplevel
 from ctypes import wintypes
 
-# --- Simplified Windows API ---
+# --- Simplified Windows API Setup ---
 k32 = ctypes.WinDLL('kernel32', use_last_error=True)
 ntdll = ctypes.WinDLL('ntdll', use_last_error=True)
 
@@ -20,12 +20,15 @@ _def(k32.IsWow64Process, wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(wintypes
 class LiteInjector:
     def __init__(self, root):
         self.root = root
-        self.root.title("Python Lite Injector")
+        self.root.title("Python Arch-Aware Injector")
         self.root.geometry("750x600")
         
         self.ninja_on, self.processed = False, set()
         self.hook_var = tk.StringVar(value=self._path("__hook__.py"))
-        self.dll_var = tk.StringVar(value=self._path("hook64.dll"))
+        
+        # Initial default based on injector arch, but logic overrides this during injection
+        is_inj_64 = platform.machine().endswith("64")
+        self.dll_var = tk.StringVar(value=self._path("hook64.dll" if is_inj_64 else "hook32.dll"))
         self.hide_std = tk.BooleanVar(value=True)
 
         self._build_ui()
@@ -39,73 +42,69 @@ class LiteInjector:
         # 1. Filters
         top = tk.Frame(self.root, pady=5)
         top.pack(fill=tk.X, padx=10)
-        tk.Button(top, text="Refresh", command=self.refresh).pack(side=tk.LEFT)
+        tk.Button(top, text="Refresh List", command=self.refresh).pack(side=tk.LEFT)
         self.search = tk.Entry(top)
         self.search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         self.search.bind("<KeyRelease>", lambda e: self.update_view())
-        tk.Checkbutton(top, text="Hide Default Installs", variable=self.hide_std, command=self.update_view).pack(side=tk.RIGHT)
+        tk.Checkbutton(top, text="Hide System Pythons", variable=self.hide_std, command=self.update_view).pack(side=tk.RIGHT)
 
-        # 2. Tree
+        # 2. Process Tree
         cols = ("PID", "Name", "Arch", "Path")
         self.tree = ttk.Treeview(self.root, columns=cols, show="headings", height=12)
-        for c, w in zip(cols, (60, 150, 60, 450)): 
+        for c, w in zip(cols, (70, 150, 70, 450)): 
             self.tree.heading(c, text=c); self.tree.column(c, width=w)
         self.tree.pack(fill=tk.BOTH, expand=True, padx=10)
         self.tree.bind("<Double-1>", lambda e: self.run_inject())
 
-        # 3. Settings (Wide Path Support)
-        cfg = tk.LabelFrame(self.root, text="Settings", padx=10, pady=5)
+        # 3. Settings
+        cfg = tk.LabelFrame(self.root, text="Injection Settings", padx=10, pady=5)
         cfg.pack(fill=tk.X, padx=10, pady=10)
         
-        h_row = tk.Frame(cfg)
-        h_row.pack(fill=tk.X, pady=2)
-        tk.Label(h_row, text="Hook File:").pack(side=tk.LEFT)
-        tk.Entry(h_row, textvariable=self.hook_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5) # Expanded
-        tk.Button(h_row, text="Edit", command=self.edit_hook).pack(side=tk.RIGHT)
-        tk.Button(h_row, text="...", command=lambda: self.hook_var.set(filedialog.askopenfilename() or self.hook_var.get())).pack(side=tk.RIGHT, padx=2)
+        h_row = tk.Frame(cfg); h_row.pack(fill=tk.X, pady=2)
+        tk.Label(h_row, text="Hook Script:").pack(side=tk.LEFT)
+        tk.Entry(h_row, textvariable=self.hook_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        tk.Button(h_row, text="Browse", command=lambda: self.hook_var.set(filedialog.askopenfilename() or self.hook_var.get())).pack(side=tk.RIGHT)
 
-        d_row = tk.Frame(cfg)
-        d_row.pack(fill=tk.X, pady=2)
-        tk.Label(d_row, text="Base DLL: ").pack(side=tk.LEFT)
-        tk.Entry(d_row, textvariable=self.dll_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        d_row = tk.Frame(cfg); d_row.pack(fill=tk.X, pady=2)
+        tk.Label(d_row, text="Base DLL Folder:").pack(side=tk.LEFT)
+        self.dll_ent = tk.Entry(d_row, textvariable=self.dll_var)
+        self.dll_ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        tk.Label(d_row, text="(Auto-swaps hook32/64)", fg="gray").pack(side=tk.RIGHT)
 
-        btns = tk.Frame(self.root, pady=5)
-        btns.pack(fill=tk.X, padx=10)
+        btns = tk.Frame(self.root, pady=5); btns.pack(fill=tk.X, padx=10)
         self.btn_ninja = tk.Button(btns, text="Ninja Mode: OFF", command=self.toggle_ninja, width=15)
         self.btn_ninja.pack(side=tk.LEFT)
-        tk.Button(btns, text="INJECT SELECTED", bg="#d32f2f", fg="white", font=("Arial", 9, "bold"), command=self.run_inject).pack(side=tk.RIGHT)
+        tk.Button(btns, text="INJECT NOW", bg="#d32f2f", fg="white", font=("Arial", 9, "bold"), command=self.run_inject).pack(side=tk.RIGHT)
 
-        self.log_box = scrolledtext.ScrolledText(self.root, height=4, state='disabled', bg="#1e1e1e", fg="#00ff00", font=("Consolas", 8))
+        self.log_box = scrolledtext.ScrolledText(self.root, height=5, state='disabled', bg="#1e1e1e", fg="#00ff00", font=("Consolas", 8))
         self.log_box.pack(fill=tk.X, padx=10, pady=5)
 
     def log(self, m):
         self.log_box.config(state='normal'); self.log_box.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {m}\n"); self.log_box.see(tk.END); self.log_box.config(state='disabled')
 
     def is_target(self, p):
-        """ Target Check: contains 'python3*.dll' and NOT in standard system paths. """
         try:
             exe = (p.info['exe'] or "").lower()
-            if self.hide_std.get():
-                # Ignore standard installation paths
-                if any(x in exe for x in ["program files", "windows", "appdata\\local\\programs\\python"]): return False
-            
-            # Identify by loaded modules
+            if self.hide_std.get() and any(x in exe for x in ["program files", "windows", "appdata\\local\\programs\\python"]): return False
             for m in p.memory_maps():
                 if "python3" in os.path.basename(m.path).lower(): return True
         except: pass
         return False
 
-    def get_arch(self, pid):
-        """ Returns True for x64, False for x86 (32-bit). """
+    def get_target_arch_64(self, pid):
+        """ Robust check: Returns True if target is x64, False if x86 (32-bit). """
         try:
-            h = k32.OpenProcess(0x1000, False, pid)
+            h = k32.OpenProcess(0x1000, False, pid) # PROCESS_QUERY_LIMITED_INFORMATION
             if h:
-                wow = wintypes.BOOL()
-                k32.IsWow64Process(h, ctypes.byref(wow))
+                is_wow64 = wintypes.BOOL()
+                k32.IsWow64Process(h, ctypes.byref(is_wow64))
                 k32.CloseHandle(h)
-                return not wow.value
+                # On 64-bit OS: IsWow64=True means 32-bit process.
+                # On 32-bit OS: IsWow64 always False, everything is 32-bit.
+                is_os_64 = platform.machine().endswith("64")
+                return (not is_wow64.value) if is_os_64 else False
         except: pass
-        return True
+        return True # Fallback to 64
 
     def refresh(self):
         self.procs = [p for p in psutil.process_iter(['pid', 'name', 'exe'])]
@@ -118,7 +117,7 @@ class LiteInjector:
             if self.is_target(p):
                 pid, name, exe = p.info['pid'], p.info['name'], p.info['exe'] or ""
                 if q in name.lower() or q in str(pid):
-                    arch = "x64" if self.get_arch(pid) else "x86"
+                    arch = "x64" if self.get_target_arch_64(pid) else "x86"
                     self.tree.insert("", tk.END, values=(pid, name, arch, exe))
 
     def run_inject(self):
@@ -129,38 +128,38 @@ class LiteInjector:
 
     def inject(self, pid, name):
         try:
-            is64 = self.get_arch(pid)
+            # 1. GET ARCH OF TARGET (Not self!)
+            is_target_64 = self.get_target_arch_64(pid)
             dll_dir = os.path.dirname(os.path.abspath(self.dll_var.get()))
             
-            # --- Architecture Logic: Forced File Names ---
-            target_dll = os.path.join(dll_dir, "hook64.dll" if is64 else "hook32.dll")
+            # 2. SELECT CORRECT DLL FOR TARGET ARCH
+            target_dll_name = "hook64.dll" if is_target_64 else "hook32.dll"
+            target_dll_path = os.path.join(dll_dir, target_dll_name)
             
-            if not os.path.exists(target_dll): 
-                return self.log(f"Error: {os.path.basename(target_dll)} missing in {dll_dir}")
+            if not os.path.exists(target_dll_path): 
+                return self.log(f"Error: {target_dll_name} not found in {dll_dir}!")
 
-            self.log(f"Injecting {os.path.basename(target_dll)} into {name} ({pid})...")
+            arch_str = "x64" if is_target_64 else "x86"
+            self.log(f"Injecting {target_dll_name} into {name} ({arch_str} PID: {pid})...")
             
-            # Setup Temp Config
-            with open(os.path.join(os.getenv('TEMP'), "hook_config.ini"), "w") as f:
+            # 3. Setup Config for DLL
+            cfg_path = os.path.join(os.getenv('TEMP'), "hook_config.ini")
+            with open(cfg_path, "w") as f:
                 f.write(f"[General]\nHookPath={os.path.dirname(os.path.abspath(self.hook_var.get()))}\n")
 
+            # 4. Standard LoadLibrary Injection
             h_proc = k32.OpenProcess(0x1F0FFF, False, pid)
-            if not h_proc: return self.log(f"Access Denied: {name}")
+            if not h_proc: return self.log(f"Access Denied for PID {pid}")
 
-            path_bytes = os.path.abspath(target_dll).encode('utf-16le') + b'\0'
+            path_bytes = os.path.abspath(target_dll_path).encode('utf-16le') + b'\0\0'
             mem = k32.VirtualAllocEx(h_proc, 0, len(path_bytes), 0x1000, 0x04)
             k32.WriteProcessMemory(h_proc, mem, path_bytes, len(path_bytes), 0)
             
             load_lib = k32.GetProcAddress(k32.GetModuleHandleW("kernel32.dll"), b"LoadLibraryW")
             h_thread = k32.CreateRemoteThread(h_proc, None, 0, load_lib, mem, 0, None)
             
-            if not h_thread: # Fallback for Windows restrictions
-                h_t = wintypes.HANDLE()
-                ntdll.NtCreateThreadEx(ctypes.byref(h_t), 0x1FFFFF, None, h_proc, load_lib, mem, 0, 0, 0, 0, None)
-                h_thread = h_t.value
-
             if h_thread:
-                self.log(f"Success! Injected into {name}.")
+                self.log(f"SUCCESS: {target_dll_name} loaded in {name}.")
                 k32.CloseHandle(h_thread)
             k32.CloseHandle(h_proc)
         except Exception as e: self.log(f"Err: {e}")
@@ -176,15 +175,7 @@ class LiteInjector:
                 if p.pid not in self.processed and p.pid != os.getpid() and self.is_target(p):
                     self.processed.add(p.pid)
                     self.inject(p.pid, p.name())
-            time.sleep(2)
-
-    def edit_hook(self):
-        top = Toplevel(self.root); top.geometry("600x400"); top.title("Hook Editor")
-        txt = scrolledtext.ScrolledText(top, font=("Consolas", 10)); txt.pack(fill=tk.BOTH, expand=True)
-        try:
-            with open(self.hook_var.get(), 'r') as f: txt.insert('1.0', f.read())
-        except: pass
-        tk.Button(top, text="Save Changes", bg="green", fg="white", command=lambda: [open(self.hook_var.get(), 'w').write(txt.get('1.0', tk.END)), messagebox.showinfo("Saved", "Hook file updated")]).pack(fill=tk.X)
+            time.sleep(1.5)
 
 if __name__ == "__main__":
     if not ctypes.windll.shell32.IsUserAnAdmin():
