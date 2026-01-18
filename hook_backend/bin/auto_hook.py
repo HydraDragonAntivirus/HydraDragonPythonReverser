@@ -64,20 +64,52 @@ class ApexEngine:
 
     @staticmethod
     def find_python_export(pid, dll_name_hint=None):
-        """Locates the PyRun_SimpleString address dynamically."""
+        """
+        DIRECT EXE INJECTION: 
+        Ignores DLL lists and targets the main executable module directly.
+        """
         try:
             process = psutil.Process(pid)
-            for m in process.memory_maps():
-                path = m.path.lower()
-                if "python" in path and path.endswith(".dll") and "pythoncom" not in path:
-                    h_local = ctypes.windll.kernel32.LoadLibraryExW(path, None, 0x01)
-                    addr = ctypes.windll.kernel32.GetProcAddress(h_local, b"PyRun_SimpleString")
-                    offset = addr - h_local
-                    remote_base = int(m.addr.split('-')[0], 16)
-                    return remote_base + offset, os.path.basename(path)
-            return None, None
-        except: return None, None
+            exe_path = process.exe() # Gets the direct path to launcher.exe / boot.exe
+            
+            kernel32 = ctypes.windll.kernel32
+            
+            # 1. Load the EXE into our process to find the export offset
+            h_local = kernel32.LoadLibraryExW(exe_path, None, 0x01)
+            if not h_local:
+                return None, None
 
+            # 2. Try to find the entry point inside the EXE itself
+            # We check for the standard export name
+            addr = kernel32.GetProcAddress(h_local, b"PyRun_SimpleString")
+            
+            if not addr:
+                # Some obfuscated or custom builds might use these
+                for alt in [b"PyRun_SimpleStringFlags", b"Py_Main"]:
+                    addr = kernel32.GetProcAddress(h_local, alt)
+                    if addr: break
+
+            if addr:
+                # 3. Calculate the address in the remote process
+                offset = addr - h_local
+                
+                # Get the base address of the main module in the target
+                # The first entry in memory_maps is almost always the EXE base
+                remote_base = None
+                for m in process.memory_maps():
+                    remote_base = int(m.addr.split('-')[0], 16)
+                    break 
+                
+                kernel32.FreeLibrary(h_local)
+                if remote_base:
+                    return remote_base + offset, os.path.basename(exe_path)
+
+            kernel32.FreeLibrary(h_local)
+            return None, None
+        except Exception as e:
+            print(f"Error: {e}")
+            return None, None
+   
     @classmethod
     def inject_ninja(cls, pid, code):
         """Ninja Mode: Context Hijacking (Stealth Execution)."""
