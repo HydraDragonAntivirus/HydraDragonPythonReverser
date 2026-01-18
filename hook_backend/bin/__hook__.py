@@ -1,5 +1,15 @@
 import sys
 import os
+
+# Get the directory where this script is located
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Add it to sys.path so 'import other_script' works
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+print(f"[HOOK] Bootstrap complete. Path added: {current_dir}")
+
 import time
 import marshal
 import gc

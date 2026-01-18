@@ -1,4 +1,4 @@
-import ctypes, os, sys, time, threading, psutil, shutil, platform
+import ctypes, os, sys, time, threading, psutil, platform
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox, Toplevel
 from ctypes import wintypes
@@ -8,9 +8,11 @@ k32 = ctypes.WinDLL('kernel32', use_last_error=True)
 ntdll = ctypes.WinDLL('ntdll', use_last_error=True)
 
 def _def(f, r, *a): f.restype, f.argtypes = r, a
+
+# Fix: Ensure types are exactly what the API expects for x64/x86 compatibility
 _def(k32.OpenProcess, wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
 _def(k32.VirtualAllocEx, wintypes.LPVOID, wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD)
-_def(k32.WriteProcessMemory, wintypes.BOOL, wintypes.HANDLE, wintypes.LPCVOID, wintypes.LPCVOID, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t))
+_def(k32.WriteProcessMemory, wintypes.BOOL, wintypes.HANDLE, wintypes.LPVOID, wintypes.LPCVOID, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t))
 _def(k32.CreateRemoteThread, wintypes.HANDLE, wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.LPVOID, wintypes.LPVOID, wintypes.DWORD, wintypes.LPDWORD)
 _def(k32.GetModuleHandleW, wintypes.HMODULE, wintypes.LPCWSTR)
 _def(k32.GetProcAddress, wintypes.LPVOID, wintypes.HMODULE, wintypes.LPCSTR)
@@ -21,14 +23,13 @@ class LiteInjector:
     def __init__(self, root):
         self.root = root
         self.root.title("Python Arch-Aware Injector")
-        self.root.geometry("750x600")
+        self.root.geometry("750x650")
         
         self.ninja_on, self.processed = False, set()
         self.hook_var = tk.StringVar(value=self._path("__hook__.py"))
         
-        # Initial default based on injector arch, but logic overrides this during injection
-        is_inj_64 = platform.machine().endswith("64")
-        self.dll_var = tk.StringVar(value=self._path("hook64.dll" if is_inj_64 else "hook32.dll"))
+        is_os_64 = platform.machine().endswith("64")
+        self.dll_var = tk.StringVar(value=self._path("hook64.dll" if is_os_64 else "hook32.dll"))
         self.hide_std = tk.BooleanVar(value=True)
 
         self._build_ui()
@@ -76,7 +77,7 @@ class LiteInjector:
         self.btn_ninja.pack(side=tk.LEFT)
         tk.Button(btns, text="INJECT NOW", bg="#d32f2f", fg="white", font=("Arial", 9, "bold"), command=self.run_inject).pack(side=tk.RIGHT)
 
-        self.log_box = scrolledtext.ScrolledText(self.root, height=5, state='disabled', bg="#1e1e1e", fg="#00ff00", font=("Consolas", 8))
+        self.log_box = scrolledtext.ScrolledText(self.root, height=6, state='disabled', bg="#1e1e1e", fg="#00ff00", font=("Consolas", 8))
         self.log_box.pack(fill=tk.X, padx=10, pady=5)
 
     def log(self, m):
@@ -86,25 +87,23 @@ class LiteInjector:
         try:
             exe = (p.info['exe'] or "").lower()
             if self.hide_std.get() and any(x in exe for x in ["program files", "windows", "appdata\\local\\programs\\python"]): return False
+            # Check for python3.dll in modules
             for m in p.memory_maps():
                 if "python3" in os.path.basename(m.path).lower(): return True
         except: pass
         return False
 
     def get_target_arch_64(self, pid):
-        """ Robust check: Returns True if target is x64, False if x86 (32-bit). """
         try:
-            h = k32.OpenProcess(0x1000, False, pid) # PROCESS_QUERY_LIMITED_INFORMATION
+            h = k32.OpenProcess(0x1000, False, pid)
             if h:
                 is_wow64 = wintypes.BOOL()
                 k32.IsWow64Process(h, ctypes.byref(is_wow64))
                 k32.CloseHandle(h)
-                # On 64-bit OS: IsWow64=True means 32-bit process.
-                # On 32-bit OS: IsWow64 always False, everything is 32-bit.
                 is_os_64 = platform.machine().endswith("64")
                 return (not is_wow64.value) if is_os_64 else False
         except: pass
-        return True # Fallback to 64
+        return True
 
     def refresh(self):
         self.procs = [p for p in psutil.process_iter(['pid', 'name', 'exe'])]
@@ -128,39 +127,46 @@ class LiteInjector:
 
     def inject(self, pid, name):
         try:
-            # 1. GET ARCH OF TARGET (Not self!)
             is_target_64 = self.get_target_arch_64(pid)
             dll_dir = os.path.dirname(os.path.abspath(self.dll_var.get()))
-            
-            # 2. SELECT CORRECT DLL FOR TARGET ARCH
             target_dll_name = "hook64.dll" if is_target_64 else "hook32.dll"
             target_dll_path = os.path.join(dll_dir, target_dll_name)
             
             if not os.path.exists(target_dll_path): 
-                return self.log(f"Error: {target_dll_name} not found in {dll_dir}!")
+                return self.log(f"Error: {target_dll_name} missing!")
 
-            arch_str = "x64" if is_target_64 else "x86"
-            self.log(f"Injecting {target_dll_name} into {name} ({arch_str} PID: {pid})...")
+            self.log(f"Injecting {target_dll_name} into {name} ({pid})...")
             
-            # 3. Setup Config for DLL
-            cfg_path = os.path.join(os.getenv('TEMP'), "hook_config.ini")
-            with open(cfg_path, "w") as f:
+            # Setup Config
+            with open(os.path.join(os.getenv('TEMP'), "hook_config.ini"), "w") as f:
                 f.write(f"[General]\nHookPath={os.path.dirname(os.path.abspath(self.hook_var.get()))}\n")
 
-            # 4. Standard LoadLibrary Injection
             h_proc = k32.OpenProcess(0x1F0FFF, False, pid)
-            if not h_proc: return self.log(f"Access Denied for PID {pid}")
+            if not h_proc: return self.log(f"Access Denied: {name}")
 
             path_bytes = os.path.abspath(target_dll_path).encode('utf-16le') + b'\0\0'
-            mem = k32.VirtualAllocEx(h_proc, 0, len(path_bytes), 0x1000, 0x04)
-            k32.WriteProcessMemory(h_proc, mem, path_bytes, len(path_bytes), 0)
+            mem = k32.VirtualAllocEx(h_proc, None, len(path_bytes), 0x1000, 0x04)
             
-            load_lib = k32.GetProcAddress(k32.GetModuleHandleW("kernel32.dll"), b"LoadLibraryW")
+            # FIX: Change 0 to None for the 5th argument (lpNumberOfBytesWritten)
+            if not k32.WriteProcessMemory(h_proc, mem, path_bytes, len(path_bytes), None):
+                return self.log("WriteProcessMemory failed")
+            
+            k32_mod = k32.GetModuleHandleW("kernel32.dll")
+            load_lib = k32.GetProcAddress(k32_mod, b"LoadLibraryW")
+            
+            # FIX: Change None to 0 for the 7th argument (lpThreadId) if necessary, 
+            # but None usually works for LPDWORD. Added safety check.
             h_thread = k32.CreateRemoteThread(h_proc, None, 0, load_lib, mem, 0, None)
             
+            if not h_thread: # Modern Windows fallback
+                h_t = wintypes.HANDLE()
+                ntdll.NtCreateThreadEx(ctypes.byref(h_t), 0x1FFFFF, None, h_proc, load_lib, mem, 0, 0, 0, 0, None)
+                h_thread = h_t.value
+
             if h_thread:
-                self.log(f"SUCCESS: {target_dll_name} loaded in {name}.")
+                self.log(f"SUCCESS: Injected into {name}.")
                 k32.CloseHandle(h_thread)
+            
             k32.CloseHandle(h_proc)
         except Exception as e: self.log(f"Err: {e}")
 
